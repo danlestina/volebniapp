@@ -1,0 +1,35 @@
+
+name: Aktualizovat vysledky CSU
+
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: csu-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Nacist vysledky
+        run: python scripts/update.py
+      - name: Ulozit data
+        run: |
+          git config user.name 'election-data-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add data/registr.json data/results.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Aktualizace dat CSU 2026'
+            git push
+          fi
