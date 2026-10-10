@@ -82,7 +82,7 @@ function refreshCoalitions(){let data=results[current?.id];if(!data||data.status
  // Velké kandidátní systémy mohou mít obrovské množství kombinací. Je-li >18 stran, použij max. 5 subjektů.
  if(parties.length>18){max=Math.min(max,5);truncated=true;}
  function make(start,selected,sum){
-  if(selected.length>=2){let diff=sum-majority;if((sum>=majority||(sum>=majority-gap&&typ!=='majority'&&typ!=='minimal')) && (typ!=='near'||sum<majority) && (typ!=='majority'||sum>=majority)){
+  if(selected.length>=1){let diff=sum-majority;if((sum>=majority||(sum>=majority-gap&&typ!=='majority'&&typ!=='minimal')) && (typ!=='near'||sum<majority) && (typ!=='majority'||sum>=majority)){
    let minimal=selected.every(x=>sum-x.seats<majority);
    if(typ!=='minimal'||minimal)solutions.push({list:[...selected],sum,delta:diff,minimal});
   }}
