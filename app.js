@@ -177,23 +177,24 @@ async function loadCandidateRoster(district){
 }
 
 // Hlasy jednotlivých kandidátů se načítají nezávisle při rozkliknutí.
-// V ČB je poskytuje veřejný nezávislý přehled přes existující Google Apps Script.
-// Ostatní obce zatím nemají ověřený zdroj průběžných osobních hlasů.
-async function loadCandidateVotes(council,party){
- if(String(council.id)!=='544256')return null;
+// Pro všechny obce se zkusí oficiální jmenný přehled ČSÚ.
+// Pokud jej ČSÚ ještě nepublikuje, u ČB zůstává nezávislý záložní zdroj.
+async function loadCandidateVotes(council,party,force=false){
  const key=String(council.id)+'/'+String(party.ballot);
  const cached=candidateVoteCache.get(key);
- if(cached && Date.now()-cached.time<25000)return cached.data;
+ if(!force && cached && Date.now()-cached.time<60000)return cached.data;
  if(candidateVotePending.has(key))return candidateVotePending.get(key);
  const pending=(async()=>{
-  const raw=await jsonp(liveUrl,council.id,{mode:'candidates',party:String(party.ballot)});
+  const raw=await jsonp(liveUrl,council.id,{mode:'candidates',party:String(party.ballot),district:String(council.district),region:String(council.region)});
   if(!raw || raw.ok!==true || String(raw.code)!==String(council.id) ||
     String(raw.party)!==String(Number(party.ballot)))throw Error(raw?.error||'Zdroj kandidátských hlasů není dostupný');
   if(!Array.isArray(raw.candidates)||!raw.candidates.length ||
      raw.candidates.some(k=>!Number.isSafeInteger(k.order)||!Number.isSafeInteger(k.votes)))
     throw Error('Chybějí platné průběžné hlasy kandidátů');
+  if(raw.candidates.length!==Number(party.candidates))
+    throw Error('Zdroj má '+raw.candidates.length+' osob, kandidátka podle registru '+party.candidates+'. Výpočet by mohl být chybný.');
   const sum=raw.candidates.reduce((v,k)=>v+k.votes,0);
-  if(sum!==Number(raw.votes))throw Error('Nesouhlasí součet hlasů kandidátů');
+  if(sum!==Number(raw.votes) || sum<=0)throw Error('Nesouhlasí součet hlasů kandidátů');
   candidateVoteCache.set(key,{time:Date.now(),data:raw});
   return raw;
  })();
@@ -233,26 +234,31 @@ function renderCandidateRanking(root,raw,party,data){
   ol.append(li);
  }
  root.append(ol);
+ if(raw.note)root.append(ce('p',raw.note,'candidate-caution'));
  const link=ce('a','Zdrojová tabulka kandidátů ↗','fineprint');link.href=raw.sourceUrl;link.target='_blank';link.rel='noopener';root.append(link);
 }
 
-async function populateCandidates(root,party,data,council){
+async function populateCandidates(root,party,data,council,force=false){
  if(!council)return;
- root.replaceChildren(ce('p','Načítám jmenný seznam kandidátů…','fineprint'));
+ // Požadavek se spouští jen při rozkliknutí (a později v intervalu u otevřeného panelu).
+ root.replaceChildren(ce('p','Načítám jmenné hlasy na vyžádání…','fineprint'));
  let livePersonVotes=null, livePersonalError=null;
- if(String(council.id)==='544256'){
-  try{livePersonVotes=await loadCandidateVotes(council,party);}
-  catch(err){livePersonalError=err.message;}
- }
+ try{livePersonVotes=await loadCandidateVotes(council,party,force);}
+ catch(err){livePersonalError=err.message;}
  const rows=livePersonVotes?null:await loadCandidateRoster(council.district);
- // Při přepnutí obce nebo pravidelné aktualizaci už nepřepisovat starý panel.
  if(!root.isConnected || current?.id!==council.id)return;
  root.replaceChildren();
+ const refresh=ce('button','↻ Obnovit hlasy kandidátů','btn secondary');
+ refresh.type='button';refresh.style.marginBottom='10px';refresh.style.padding='7px 10px';
+ refresh.addEventListener('click',()=>void populateCandidates(root,party,data,council,true));
+ root.append(refresh);
  const roster=rows?.[String(council.id)]?.[String(party.ballot)]||[];
  const elected=Array.isArray(party.elected)?party.elected.filter(x=>String(x.name||'').trim()):[];
  const n=int(party.seats);
  if(livePersonVotes){renderCandidateRanking(root,livePersonVotes,party,data);return;}
- if(livePersonalError)root.append(ce('p','Živé osobní hlasy se nepodařilo načíst: '+livePersonalError,'candidate-caution'));
+ if(livePersonalError)root.append(ce('p',
+   'Jmenné hlasy pro tuto kandidátku nejsou k dispozici: '+livePersonalError,
+   'candidate-caution'));
  if(data.complete && elected.length){
   root.append(ce('h4',`Oficiálně zvolení (${elected.length} z ${n} mandátů)`, 'candidate-heading'));
   const ol=ce('ol','','candidate-list');
@@ -275,10 +281,10 @@ async function populateCandidates(root,party,data,council){
  }else if(data.complete){
   root.append(ce('p',`Mandátů: ${n}. Jména oficiálně zvolených zatím nejsou v dostupném výsledku ČSÚ. Níže je pouze původní pořadí listiny.`, 'candidate-caution'));
  }else{
-  root.append(ce('p',`Průběžný přepočet přiděluje této kandidátce ${n} mandátů. Jména zatím nelze spolehlivě určit: pro tuto obec zatím nejsou napojené ověřené osobní hlasy kandidátů. Ti mohou přednostně přeskočit pořadí.`, 'candidate-caution'));
+  root.append(ce('p',`Průběžný přepočet přiděluje kandidátce ${n} mandátů. Nemáme ověřené hlasy jednotlivých kandidátů, a proto nelze určit přednostní postup. Níže je pouze původní pořadí.`, 'candidate-caution'));
  }
  if(!roster.length){
-  root.append(ce('p','Jmenný registr ještě není zveřejněn. Po prvním načtení kandidátek v GitHub Actions se objeví automaticky.','fineprint'));
+  root.append(ce('p','Jmenný registr zatím není dostupný.','fineprint'));
   return;
  }
  root.append(ce('h4','Kandidáti v původním pořadí na listině','candidate-heading'));
@@ -286,14 +292,10 @@ async function populateCandidates(root,party,data,council){
  for(const person of roster){
   const li=ce('li',person.name);
   li.value=Number(person.order);
-  if(!data.complete && n>0 && Number(person.order)<=n){
-   li.className='on-ballot-front';
-   li.title='V pořadí kandidátní listiny do hranice počtu mandátů; nejde o určení zvolení.';
-  }
   ol.append(li);
  }
  root.append(ol);
- if(!data.complete && n>0)root.append(ce('p',`Tučně vyznačených prvních ${n} míst je pouze orientačních podle původního pořadí, nikoli výpočtem osob se získaným mandátem.`, 'fineprint'));
+ root.append(ce('p','Seznam výše není vypočtené pořadí zvolených osob.','fineprint'));
 }
 
 function setupOptions(data){let root=$('#exclusions'),existing=new Set([...root.querySelectorAll('input:checked')].map(x=>x.value));root.replaceChildren();
