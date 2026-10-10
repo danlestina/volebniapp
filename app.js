@@ -2,12 +2,17 @@
 const $=s=>document.querySelector(s), ce=(tag,text='',cls='')=>{let el=document.createElement(tag);el.textContent=text; if(cls) el.className=cls;return el;};
 const cf=new Intl.NumberFormat('cs-CZ');
 let reg=null, results={}, current=null, coalAll=[], page=0, filtered=[], state=null, pollTimer=null, requestSeq=0;
+let liveUrl="";
+const liveInFlight=new Set();
+const liveResults=new Map();
 const districtLoaded=new Map();
 const colors=['#367bc3','#f09e34','#27a69a','#ad6ac4','#d86579','#76953f','#7a8da2','#c08f64','#658ce4','#a0af4d','#d87046','#588a84','#9367a7','#bd7e9b'];
 const squish=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 const int=n=>Number(n)||0;
 const num=n=>cf.format(int(n));
 const labelText=(root,value,cls='')=>root.append(ce('span',value,cls));
+// Rychlá data mají přednost před zpožděnými okresními soubory z GitHubu.
+const resultFor=id=>liveResults.get(String(id))?.result || results[String(id)];
 const PICK=['České Budějovice','Praha','Praha 10','Čestlice','Deštné v Orlických horách','Brno'];
 function createSelector(root,id,text){const b=ce('button',text,'pick');b.type='button';b.addEventListener('click',()=>choose(id));b.dataset.place=id;root.append(b);}
 function renderLeft(){
@@ -40,11 +45,14 @@ async function choose(id){
  $('#seatsContent').replaceChildren(ce('p','Načítám výsledky obce…','muted'));
  await loadDistrict(selected.district);
  // Rychlé přepínání mezi obcemi nesmí vykreslit starý výběr.
- if(sequence===requestSeq && current?.id===selected.id) display();
+ if(sequence===requestSeq && current?.id===selected.id) {
+  display();
+  if(liveUrl)void loadLiveForCurrent();
+ }
  if(window.innerWidth<760)$('#summary').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function display(){if(!current)return;
- const c=current, data=results[c.id];$('#cityName').textContent=c.name;
+ const c=current, data=resultFor(c.id);$('#cityName').textContent=c.name;
  const meta=$('#meta');meta.replaceChildren();labelText(meta,`Zastupitelů: ${num(c.seats)}`,'pill');labelText(meta,`Kód: ${c.id}`,'subtle');
  if(c.pirateNominated){labelText(meta,`Nominace Pirátů: ${c.pirateNominated}`,'pill');const ds=ce('details');const summ=ce('summary','Zobrazit nominované kandidáty','subtle');summ.style.cursor='pointer';ds.append(summ);for(let p of c.pirateCandidates||[])ds.append(ce('div',`${p.name} – ${p.party}`,'fineprint'));meta.append(ds);}
  const sm=$('#summary');sm.querySelectorAll('.warning,.info,.error').forEach(n=>n.remove());const info=ce('div','','info');info.style.marginTop='16px';sm.append(info);
@@ -100,7 +108,7 @@ function calculateCoalitions(parties,majority,maxParties,gap,typeFilter){
  return solutions;
 }
 function refreshCoalitions(){
- let data=results[current?.id];if(!data||data.status!=='ok')return;
+ let data=resultFor(current?.id);if(!data||data.status!=='ok')return;
  const excl=new Set([...document.querySelectorAll('#exclusions input:checked')].map(x=>x.value));
  const parties=data.parties.filter(p=>p.seats>0&&!excl.has(p.ballot));
  const seats=current.seats,majority=Math.floor(seats/2)+1;
@@ -125,6 +133,118 @@ function showCoalitions(){const root=$('#coalitionResults');if(page===0)root.rep
 }
 for(let id of ['maxParties','typeFilter','gap'])$(('#'+id)).addEventListener('change',refreshCoalitions);
 $('#more').addEventListener('click',showCoalitions);
+
+// Prevod aktualniho stavoveho XML jedne obce na stejna data jako okresni parser.
+// Kandidatky i pocet kandidatu bereme z ulozeneho registru ČSÚ.
+function convertLiveData(raw, council){
+ if(!raw || raw.ok!==true || String(raw.code)!==String(council.id))throw Error(raw?.error||'ČSÚ nevrátilo údaje o požadované obci');
+ if(council.wards)return {status:'warded',message:'Zastupitelstvo má více volebních obvodů, průběžný přepočet není podporován.'};
+ const ballots=(council.ballots||[]).filter(p=>String(p.ward)==='1');
+ const ballotMap=new Map(ballots.map(p=>[String(p.ballot),p]));
+ const items=raw.parties||[];
+ if(!items.length || items.length!==ballots.length || new Set(items.map(p=>String(p.ballot))).size!==items.length)
+  throw Error('Výsledky se neshodují s registrem kandidátek; ponechávám poslední uložená data.');
+ const parties=items.map(p=>{
+  const b=ballotMap.get(String(p.ballot));
+  if(!b || !Number.isSafeInteger(Number(p.votes)) || Number(p.votes)<0)throw Error('Neodpovídající číslo kandidátky nebo hlasy');
+  return {ballot:String(p.ballot),name:b.name,votes:Number(p.votes),officialSeats:p.officialSeats,
+    candidates:Number(b.candidates)||0};
+ });
+ const {seats,threshold,tie}=liveDHondt(parties,Number(council.seats));
+ const official=parties.reduce((sum,p)=>sum+(Number(p.officialSeats)||0),0);
+ const allOfficial=parties.every(p=>p.officialSeats!=null);
+ const complete=Boolean(raw.complete || raw.total!=null && raw.processed!=null && raw.processed===raw.total);
+ for(const p of parties)p.seats=(complete && allOfficial && official===Number(council.seats))?Number(p.officialSeats):Number(seats[p.ballot]||0);
+ return {status:'ok',total:raw.total,processed:raw.processed,complete,threshold,lotTie:tie,parties};
+}
+function liveDHondt(parties,seats){
+ const total=parties.reduce((sum,p)=>sum+p.votes,0),counts={};
+ for(const p of parties)counts[p.ballot]=0;
+ if(!total || seats<=0)return {seats:counts,threshold:null,tie:false};
+ const valid=parties.filter(p=>p.candidates>0 && p.votes>0);
+ if(!valid.length)return {seats:counts,threshold:null,tie:false};
+ let eligible=valid,threshold=null;
+ if(parties.length>1){
+  threshold=0;
+  for(let t=5;t>=0;t--){
+   const cand=valid.filter(p=>p.votes*100*seats>=t*total*Math.min(p.candidates,seats));
+   const need=Math.min(seats,Math.max(Math.floor(seats/2)+1,5));
+   if(cand.length>=2 && cand.reduce((s,p)=>s+Math.min(p.candidates,seats),0)>=need){
+    eligible=cand;threshold=t;break;
+   }
+  }
+ }
+ const quot=[];
+ for(const p of eligible)for(let d=1;d<=Math.min(seats,p.candidates);d++)quot.push({votes:p.votes,divisor:d,ballot:p.ballot});
+ quot.sort((a,b)=>{
+  const diff=b.votes*a.divisor-a.votes*b.divisor;
+  return diff || b.votes-a.votes;
+ });
+ const selected=quot.slice(0,seats);
+ for(const p of selected)counts[p.ballot]++;
+ const tie=quot.length>seats && selected.length>0 &&
+  quot[seats].votes*selected[selected.length-1].divisor===selected[selected.length-1].votes*quot[seats].divisor &&
+  quot[seats].votes===selected[selected.length-1].votes;
+ return {seats:counts,threshold,tie};
+}
+// Google Apps Script poskytuje verejny JSONP; kazdy dotaz stahuje pouze jednu obec.
+// U cloveka mimo nasi domenu se nepredava zadna soukroma informace.
+function jsonp(url,code){
+ return new Promise((resolve,reject)=>{
+  const cb='volebniLive_'+Date.now()+'_'+Math.floor(Math.random()*1000000);
+  const script=document.createElement('script');
+  let finished=false;
+  const finish=(error,value)=>{
+   if(finished)return;finished=true;clearTimeout(timer);delete window[cb];script.remove();
+   error?reject(error):resolve(value);
+  };
+  const timer=setTimeout(()=>finish(Error('Vypršel čas čekání na Google Apps Script')),20000);
+  window[cb]=value=>finish(null,value);
+  script.onerror=()=>finish(Error('Není dostupná služba Google Apps Script'));
+  script.src=url+(url.includes('?')?'&':'?')+'code='+encodeURIComponent(code)+'&callback='+encodeURIComponent(cb)+'&t='+Date.now();
+  document.head.append(script);
+ });
+}
+async function loadLiveForCurrent(){
+ if(!liveUrl || !current)return;
+ const selectedId=String(current.id);
+ if(liveInFlight.has(selectedId))return;
+ liveInFlight.add(selectedId);
+ try{
+  const raw=await jsonp(liveUrl,selectedId);
+  const council=reg?.councils?.[selectedId];
+  if(!council)return;
+  const value=convertLiveData(raw,council);
+  if(value.status!=='ok')throw Error(value.message);
+  liveResults.set(selectedId,{result:value,published:raw.published,fetched:new Date()});
+  if(current?.id===selectedId){
+   display();
+   const source=raw.published?' · ČSÚ '+raw.published.replace('T',' '):'';
+   $('#liveStatus').textContent='Rychlý režim funguje'+source+'; kontrola '+new Date().toLocaleTimeString('cs-CZ');
+   $('#status').textContent='Živá obec z ČSÚ'+(raw.published?' · '+raw.published.replace('T',' '):'');
+  }
+ }catch(error){
+  $('#liveStatus').textContent='Rychlý režim: '+error.message+' · GitHub zůstává záložním zdrojem.';
+ }finally{liveInFlight.delete(selectedId);}
+}
+function isValidLiveUrl(url){
+ try{const u=new URL(url);return u.protocol==='https:' && u.hostname==='script.google.com' && /^\/macros\/s\/[A-Za-z0-9_-]+\/exec\/?$/.test(u.pathname);}catch{return false;}
+}
+function saveLive(){
+ const value=$('#liveEndpoint').value.trim();
+ if(value && !isValidLiveUrl(value)){
+  $('#liveStatus').textContent='Neplatná adresa. Vlož celý odkaz Web app končící /exec.';
+  return;
+ }
+ liveUrl=value;
+ try{localStorage.setItem('volebniapp_live_url',liveUrl);}catch{}
+ if(!liveUrl){liveResults.clear();$('#liveStatus').textContent='Rychlý režim vypnut, používají se výsledky GitHubu.';display();return;}
+ $('#liveStatus').textContent='Zkouším živý zdroj pro vybranou obec…';
+ void loadLiveForCurrent();
+}
+$('#saveLive').addEventListener('click',saveLive);
+try{const v=localStorage.getItem('volebniapp_live_url')||'';if(isValidLiveUrl(v)){liveUrl=v;$('#liveEndpoint').value=v;$('#liveStatus').textContent='Rychlý režim zapnut: první kontrola při načtení obce.';}}catch{}
+
 // Registry se načtou jednou za návštěvu. Výsledky jsou rozdělené podle okresů.
 async function loadDistrict(district, force=false){
  const id=String(district), revision=state?.lastBatch ?? 0;
@@ -181,14 +301,19 @@ async function checkUpdates(first=false){
 }
 function schedulePolling(){
  if(pollTimer)clearInterval(pollTimer);
- const minutes=Number($('#pollInterval').value)||2;
- try{localStorage.setItem('volebniapp_poll_minutes',String(minutes));}catch{}
- pollTimer=setInterval(()=>{if(reg)checkUpdates();},minutes*60000);
+ const seconds=Number($('#pollInterval').value)||30;
+ try{localStorage.setItem('volebniapp_poll_seconds',String(seconds));}catch{}
+ pollTimer=setInterval(async()=>{
+  if(!reg)return;
+  await checkUpdates();
+  if(liveUrl)await loadLiveForCurrent();
+ },seconds*1000);
 }
 $('#pollInterval').addEventListener('change',schedulePolling);
 $('#refreshNow').addEventListener('click',async()=>{
  await checkUpdates();
  if(current){await loadDistrict(current.district,true);display();}
+ if(liveUrl)await loadLiveForCurrent();
 });
-try{const v=localStorage.getItem('volebniapp_poll_minutes');if(['1','2','5','10'].includes(v))$('#pollInterval').value=v;}catch{}
+try{const v=localStorage.getItem('volebniapp_poll_seconds');if(['15','30','60','120','300','600'].includes(v))$('#pollInterval').value=v;}catch{}
 schedulePolling();initialize();
