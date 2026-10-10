@@ -213,8 +213,17 @@ def parse_batch(xml):
             ballot=pick_num(pa,'POR_STR_HLAS_LIST','POR_STR_HL','PORADI_STRANY','CIS_STRANY','POR_STRANY','KSTRANA','PORADI')
             votes=pick_num(pa,'HLASY_STR','HLASY','HLASY_CELK','POC_HLASU','HLASY_VS','HLASY_STRANA','HLASY_POCET','HLASY_CELKEM','POC_HLASU_STR')
             if ballot is not None and votes is not None:
+                elected=[]
+                for z in p.iter():
+                    if uppername(z.tag)!='ZASTUPITEL':continue
+                    za=attr(z)
+                    person=' '.join(v for v in (za.get('TITULPRED'),za.get('JMENO'),za.get('PRIJMENI'),za.get('TITULZA')) if v).strip()
+                    if person:
+                        elected.append({'name':person,'order':pick_num(za,'PORADOVE_CISLO'),
+                                        'votes':pick_num(za,'HLASY')})
                 parties.append({'ballot':str(ballot),'votes':votes,
-                                'officialSeats':pick_num(pa,'ZASTUPITELE_POCET','MAND_STR','MANDATY','POC_MANDATU','MANDATY_POCET')})
+                                'officialSeats':pick_num(pa,'ZASTUPITELE_POCET','MAND_STR','MANDATY','POC_MANDATU','MANDATY_POCET'),
+                                'elected':elected})
         if not parties:
             raise ValueError(f'Zastupitelstvo {id} v dávce nemá rozpoznané kandidátky ani hlasy; dávka se nepřeskočí.')
         processed=pick_num(a,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU')
