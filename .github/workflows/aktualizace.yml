@@ -1,35 +1,82 @@
-
-name: Aktualizovat vysledky CSU
+name: Volební výsledky a zveřejnění webu
 
 on:
+  push:
+    branches: [main]
   schedule:
+    # GitHub nejrychleji po 5 minutách; může se opozdit.
     - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
+    inputs:
+      refresh_registry:
+        description: 'Znovu načíst registry kandidátů? (jinak se po prvním úspěchu nestahují)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
-  group: csu-update
+  group: volebniapp-aktualizace
   cancel-in-progress: false
 
 jobs:
-  update:
+  update-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Nacist vysledky
-        run: python scripts/update.py
-      - name: Ulozit data
+      - name: Testy aplikace
+        run: python -m unittest discover -s tests -v
+      - name: Jednorázově načíst registry kandidátů ČSÚ
+        env:
+          FORCE_REGISTRY: ${{ inputs.refresh_registry || 'false' }}
+        run: python scripts/update.py --registry-only
+      - name: Uložit registry do repozitáře
         run: |
-          git config user.name 'election-data-bot'
-          git config user.email 'actions@users.noreply.github.com'
-          git add data/registr.json data/results.json
+          git config user.name election-data-bot
+          git config user.email actions@users.noreply.github.com
+          git add data/
           if ! git diff --cached --quiet; then
-            git commit -m 'Aktualizace dat CSU 2026'
+            git commit -m 'Seznamy kandidátů ČSÚ'
             git push
           fi
+      - name: Přečíst přírůstkové dávky ČSÚ
+        id: batches
+        continue-on-error: true
+        run: python scripts/update.py --results-only
+      - name: Uložit do repozitáře úspěšně zpracované dávky
+        run: |
+          git add data/
+          if ! git diff --cached --quiet; then
+            git commit -m 'Nové výsledky ČSÚ'
+            git push
+          fi
+      - name: Připravit web
+        run: |
+          mkdir -p public
+          cp index.html app.js public/
+          cp -r data public/data
+          touch public/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+      - name: Zveřejnit web
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Zkontrolovat výsledek importu dat
+        if: ${{ steps.batches.outcome == 'failure' }}
+        run: |
+          echo 'Při načítání výsledků ČSÚ nastala chyba. Registry již byly zveřejněny; viz krok Přečíst přírůstkové dávky ČSÚ.'
+          exit 1
