@@ -29,7 +29,20 @@ function drawPirates(all){let q=squish($('#pirateSearch').value),items=all.filte
  for(let c of items){let b=ce('button',`${c.name} · ${c.pirateNominated} nomin.`);b.addEventListener('click',()=>choose(c.id));root.append(b);}
  if(!items.length)root.append(ce('p','Žádné odpovídající obce.','left-note'));
 }
-function choose(id){current=reg.councils[String(id)];if(!current)return;history.replaceState(null,'','#'+encodeURIComponent(id));document.querySelectorAll('.pick').forEach(x=>x.classList.toggle('active',x.dataset.place==id));display();if(window.innerWidth<760)$('#summary').scrollIntoView({behavior:'smooth',block:'start'});}
+async function choose(id){
+ const selected=reg.councils[String(id)];
+ if(!selected)return;
+ current=selected;
+ const sequence=++requestSeq;
+ history.replaceState(null,'','#'+encodeURIComponent(id));
+ document.querySelectorAll('.pick').forEach(x=>x.classList.toggle('active',x.dataset.place==id));
+ $('#cityName').textContent=selected.name;
+ $('#seatsContent').replaceChildren(ce('p','Načítám výsledky obce…','muted'));
+ await loadDistrict(selected.district);
+ // Rychlé přepínání mezi obcemi nesmí vykreslit starý výběr.
+ if(sequence===requestSeq && current?.id===selected.id) display();
+ if(window.innerWidth<760)$('#summary').scrollIntoView({behavior:'smooth',block:'start'});
+}
 function display(){if(!current)return;
  const c=current, data=results[c.id];$('#cityName').textContent=c.name;
  const meta=$('#meta');meta.replaceChildren();labelText(meta,`Zastupitelů: ${num(c.seats)}`,'pill');labelText(meta,`Kód: ${c.id}`,'subtle');
@@ -62,7 +75,7 @@ function setupOptions(data){let root=$('#exclusions'),existing=new Set([...root.
 }
 function renderCoalitions(data){setupOptions(data);refreshCoalitions();}
 function refreshCoalitions(){let data=results[current?.id];if(!data||data.status!=='ok')return;
- let excl=new Set([...$('#exclusions input:checked')].map(x=>x.value));let parties=data.parties.filter(p=>p.seats>0&&!excl.has(p.ballot));let seats=current.seats,majority=Math.floor(seats/2)+1;
+ let excl=new Set([...document.querySelectorAll('#exclusions input:checked')].map(x=>x.value));let parties=data.parties.filter(p=>p.seats>0&&!excl.has(p.ballot));let seats=current.seats,majority=Math.floor(seats/2)+1;
  $('#goal').textContent=`Většina ${majority} / ${seats}`;
  let max=Math.min(int($('#maxParties').value),parties.length), gap=int($('#gap').value),typ=$('#typeFilter').value;
  let solutions=[];let truncated=false;
@@ -157,6 +170,9 @@ function schedulePolling(){
  pollTimer=setInterval(()=>{if(reg)checkUpdates();},minutes*60000);
 }
 $('#pollInterval').addEventListener('change',schedulePolling);
-$('#refreshNow').addEventListener('click',()=>checkUpdates());
+$('#refreshNow').addEventListener('click',async()=>{
+ await checkUpdates();
+ if(current){await loadDistrict(current.district,true);display();}
+});
 try{const v=localStorage.getItem('volebniapp_poll_minutes');if(['1','2','5','10'].includes(v))$('#pollInterval').value=v;}catch{}
 schedulePolling();initialize();
