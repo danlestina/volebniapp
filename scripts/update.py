@@ -26,6 +26,7 @@ DIST_DIR = DATA / 'okresy'
 REG_URL = 'https://volby.gov.cz/opendata/kv2026/csv_od/{}.csv'
 BATCH_URL = 'https://volby.gov.cz/appdata/kv2026/20261009/odata/obce_d/vysledky_obce_{:05d}.xml'
 PIRATI_NSTRANA = '720'
+PRAHA_COUNCIL_ID = '554782'  # KODZASTUP hlavního města Prahy podle ČSÚ
 PRESETS = ['České Budějovice', 'Praha', 'Praha 10', 'Čestlice', 'Deštné v Orlických horách', 'Brno']
 MAX_BATCHES = 100  # po delším výpadku zbytek dožene další běh; nikdy nevynechá dávku
 
@@ -98,6 +99,18 @@ def load_csv(name):
     return [{k.strip().upper():(v or '').strip() for k,v in row.items() if k} for row in csv.DictReader(io.StringIO(text),delimiter=separator)]
 
 
+def fix_praha_preset(registry):
+    """Doplní předvolbu Prahy také do jednou staženého registru."""
+    councils = registry.get('councils', {})
+    if PRAHA_COUNCIL_ID not in councils:
+        raise ValueError('Registr ČSÚ neobsahuje zastupitelstvo Prahy 554782; nelze opravit předvolbu.')
+    presets = registry.setdefault('presets', {})
+    if presets.get('Praha') == PRAHA_COUNCIL_ID:
+        return False
+    presets['Praha'] = PRAHA_COUNCIL_ID
+    return True
+
+
 def build_registry():
     councils_rows=load_csv('kvrzcoco')
     lists_rows=load_csv('kvros')
@@ -155,6 +168,7 @@ def build_registry():
             matches.sort(key=lambda c:(c['seats'],c['id']), reverse=True)
             mapping[name]=matches[0]['id']
         else:print('POZOR nenalezena předvolba',name,file=sys.stderr)
+    fix_praha_preset({'councils': councils, 'presets': mapping})
     print(f'Registry ČSÚ: {len(councils)} zastupitelstev, {len(south)} jihočeských s nominací Pirátů, {len(mapping)} předvoleb')
     return {'updated':now(),'source':'ČSÚ – registr kandidátek a kandidátů pro komunální volby 2026',
             'councils':councils,'presets':mapping,'southBohemiaPirates':south}
@@ -164,6 +178,9 @@ def ensure_registry(force=False):
     p=DATA/'registr.json'
     previous=read_json(p)
     if len(previous.get('councils',{}))>5000 and not force:
+        if fix_praha_preset(previous):
+            write_json(p, previous)
+            print('Doplněna předvolba Praha (554782) do již uloženého registru.')
         print('Registr kandidátů: používám již uložená data, znovu nestahuji.')
         return previous
     value=build_registry()
