@@ -23,6 +23,7 @@ from xml.etree import ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
 DIST_DIR = DATA / 'okresy'
+CAND_DIR = DATA / 'kandidati'
 REG_URL = 'https://volby.gov.cz/opendata/kv2026/csv_od/{}.csv'
 BATCH_URL = 'https://volby.gov.cz/appdata/kv2026/20261009/odata/obce_d/vysledky_obce_{:05d}.xml'
 PIRATI_NSTRANA = '720'
@@ -186,6 +187,80 @@ def ensure_registry(force=False):
     value=build_registry()
     write_json(p,value)
     return value
+
+
+
+def parse_candidate_rosters(rows, reg):
+    """Jmenné listiny z kvrk.csv odděleně od malého registru obcí.
+
+    Pro aplikaci s jedním volebním obvodem stačí COBVODU=1.
+    Registrované osoby neznamenají průběžně zvolené osoby!
+    """
+    councils = reg['councils']
+    ballot_by_key = {}
+    for council in councils.values():
+        for b in council.get('ballots', []):
+            ballot_by_key[(council['id'], code(b.get('ward')), code(b.get('id')))] = b['ballot']
+
+    out = {}
+    seen = set()
+    for row in rows:
+        if row.get('PLATNOST', 'A').upper() not in ('A', '0'):
+            continue
+        council_id = code(row.get('KODZASTUP'))
+        council = councils.get(council_id)
+        if council is None:
+            continue
+        ward = code(row.get('COBVODU') or 1)
+        ballot = ballot_by_key.get((council_id, ward, code(row.get('OSTRANA'))))
+        if ballot is None or ward != '1':
+            continue
+        order = norm_int(row.get('PORCISLO'))
+        if order <= 0:
+            raise ValueError('Kandidát nemá rozpoznané pořadí PORCISLO: ' + council_id)
+        name = ' '.join(x for x in (
+            row.get('TITULPRED', ''), row.get('JMENO', ''),
+            row.get('PRIJMENI', ''), row.get('TITULZA', '')
+        ) if x).strip()
+        if not name:
+            raise ValueError('Kandidát nemá jméno: ' + council_id)
+        key = (council_id, ballot, order)
+        if key in seen:
+            raise ValueError('Duplicitní pořadí kandidáta v ' + council_id + ' / ' + ballot)
+        seen.add(key)
+        district = str(council['district'])
+        out.setdefault(district, {}).setdefault(council_id, {}).setdefault(ballot, []).append(
+            {'order': order, 'name': name}
+        )
+    for district in out.values():
+        for council in district.values():
+            for people in council.values():
+                people.sort(key=lambda x: x['order'])
+    return out
+
+
+def ensure_candidate_rosters(reg, force=False):
+    """Poprvé načte jména kandidátů, dále načítá pouze lokální JSON.
+    Soubory rozdělené po okresech nezpomalují vyhledávání obcí.
+    """
+    manifest = CAND_DIR / 'manifest.json'
+    previous = read_json(manifest, {})
+    districts = previous.get('districts') or []
+    if (not force and previous.get('candidates', 0) > 100000 and len(districts) > 60
+            and all((CAND_DIR / (str(d) + '.json')).exists() for d in districts)):
+        print(f'Jmenné kandidátní listiny: uloženo {previous["candidates"]} kandidátů, nestahuji znovu.')
+        return
+    rows = load_csv('kvrk')
+    parsed = parse_candidate_rosters(rows, reg)
+    candidate_count = sum(len(people) for district in parsed.values()
+                          for council in district.values() for people in council.values())
+    if candidate_count < 100000 or len(parsed) < 60:
+        raise ValueError(f'Neúplné jmenné kandidátky: {candidate_count} lidí / {len(parsed)} okresů; nic neoznačuji za hotové.')
+    for district, councils in parsed.items():
+        write_json(CAND_DIR / (district + '.json'), {'councils': councils})
+    write_json(manifest, {'created': now(), 'candidates': candidate_count,
+                         'districts': sorted(parsed, key=int), 'version': 1})
+    print(f'Jmenné kandidátní listiny ČSÚ: {candidate_count} lidí v {len(parsed)} okresech.')
 
 
 def parse_batch(xml):
@@ -360,6 +435,7 @@ def main():
     if args.registry_only and args.results_only:parser.error('Nelze kombinovat --registry-only a --results-only')
     force=os.environ.get('FORCE_REGISTRY','').lower() in ('true','yes','1')
     reg=ensure_registry(force=force and not args.results_only)
+    if args.registry_only:ensure_candidate_rosters(reg, force=force)
     if not args.registry_only:update_batches(reg)
 
 if __name__=='__main__':main()
