@@ -60,7 +60,7 @@ function blank(){$('#seatsContent').replaceChildren(ce('p','Čeká se na data.',
 function renderSeats(data){
  const area=$('#seatsContent');area.replaceChildren();const total=int(current.seats),seatSum=data.parties.reduce((s,p)=>s+int(p.seats),0),maj=Math.floor(total/2)+1;
  let line=ce('div',`Potřeba pro většinu: ${maj} z ${total} mandátů`,'big');area.append(line);
- if(seatSum<total)area.append(ce('p',`Zatím přiděleno ${seatSum} z ${total} mandátů (např. kvůli malému počtu kandidátů).`,'subtle'));
+ if(seatSum<total)area.append(ce('p',data.complete?`Obsazeno ${seatSum} z ${total} mandátů. Zbývající ${total-seatSum} nebyl${total-seatSum===1?'':'y'} přidělen${total-seatSum===1?'':'y'} (např. kvůli počtu kandidátů).`:`Průběžně přiděleno ${seatSum} z ${total} mandátů.`, 'subtle'));
  let bar=ce('div','','seatbar');bar.setAttribute('aria-label','Graf mandátů');
  const sorted=[...data.parties].sort((a,b)=>b.seats-a.seats || b.votes-a.votes);let idx=0;
  for(const p of sorted){if(!p.seats)continue;const seg=ce('span');seg.style.flex=String(p.seats);seg.style.background=colors[idx++%colors.length];seg.title=`${p.name}: ${p.seats} mandátů`;bar.append(seg);}area.append(bar);
@@ -74,25 +74,41 @@ function setupOptions(data){let root=$('#exclusions'),existing=new Set([...root.
  }
 }
 function renderCoalitions(data){setupOptions(data);refreshCoalitions();}
-function refreshCoalitions(){let data=results[current?.id];if(!data||data.status!=='ok')return;
- let excl=new Set([...document.querySelectorAll('#exclusions input:checked')].map(x=>x.value));let parties=data.parties.filter(p=>p.seats>0&&!excl.has(p.ballot));let seats=current.seats,majority=Math.floor(seats/2)+1;
- $('#goal').textContent=`Většina ${majority} / ${seats}`;
- let max=Math.min(int($('#maxParties').value),parties.length), gap=int($('#gap').value),typ=$('#typeFilter').value;
- let solutions=[];let truncated=false;
- // Velké kandidátní systémy mohou mít obrovské množství kombinací. Je-li >18 stran, použij max. 5 subjektů.
- if(parties.length>18){max=Math.min(max,5);truncated=true;}
- function make(start,selected,sum){
-  if(selected.length>=1){let diff=sum-majority;if((sum>=majority||(sum>=majority-gap&&typ!=='majority'&&typ!=='minimal')) && (typ!=='near'||sum<majority) && (typ!=='majority'||sum>=majority)){
-   let minimal=selected.every(x=>sum-x.seats<majority);
-   if(typ!=='minimal'||minimal)solutions.push({list:[...selected],sum,delta:diff,minimal});
-  }}
-  if(selected.length>=max)return;
-  for(let i=start;i<parties.length;i++)make(i+1,[...selected,parties[i]],sum+parties[i].seats);
+// Aritmetické kombinace. Zahrnuje i jedinou kandidátku se samostatnou většinou.
+function calculateCoalitions(parties,majority,maxParties,gap,typeFilter){
+ const max=Math.min(Math.max(1,maxParties),parties.length);
+ const solutions=[];
+ function recurse(start,picked,sum){
+  if(picked.length){
+   const delta=sum-majority;
+   const isMajority=delta>=0;
+   const near=!isMajority && -delta<=gap;
+   const minimal=isMajority && picked.every(p=>sum-p.seats<majority);
+   if((isMajority||near) &&
+     (typeFilter!=='majority'||isMajority) &&
+     (typeFilter!=='near'||near) &&
+     (typeFilter!=='minimal'||minimal)){
+    solutions.push({list:[...picked],sum,delta,minimal});
+   }
+  }
+  if(picked.length>=max)return;
+  for(let i=start;i<parties.length;i++)recurse(i+1,[...picked,parties[i]],sum+parties[i].seats);
  }
- make(0,[],0);
- // Výpis: většiny a skoro-většiny, uvnitř od menšího počtu kandidátek; bez hodnocení politické vhodnosti.
- solutions.sort((a,b)=>b.delta-a.delta || a.list.length-b.list.length || a.sum-b.sum || a.list.map(p=>p.name).join('|').localeCompare(b.list.map(p=>p.name).join('|'),'cs'));
- // Pro rychlé nalezení 'skoro-většin' nezapadnou za obrovské většinové kombinace; dvě sekce.
+ recurse(0,[],0);
+ solutions.sort((a,b)=>b.delta-a.delta || a.list.length-b.list.length || a.sum-b.sum ||
+   a.list.map(p=>p.name).join('|').localeCompare(b.list.map(p=>p.name).join('|'),'cs'));
+ return solutions;
+}
+function refreshCoalitions(){
+ let data=results[current?.id];if(!data||data.status!=='ok')return;
+ const excl=new Set([...document.querySelectorAll('#exclusions input:checked')].map(x=>x.value));
+ const parties=data.parties.filter(p=>p.seats>0&&!excl.has(p.ballot));
+ const seats=current.seats,majority=Math.floor(seats/2)+1;
+ $('#goal').textContent=`Většina ${majority} / ${seats}`;
+ let max=Math.min(int($('#maxParties').value),parties.length),gap=int($('#gap').value),typ=$('#typeFilter').value;
+ let truncated=false;
+ if(parties.length>18){max=Math.min(max,5);truncated=true;}
+ const solutions=calculateCoalitions(parties,majority,max,gap,typ);
  coalAll=solutions;page=0;filtered=solutions;
  const nMaj=solutions.filter(a=>a.delta>=0).length,nNear=solutions.length-nMaj;
  $('#coalitionCount').textContent=`${nMaj} většinových, ${nNear} téměř většinových kombinací`+(truncated?' · u více než 18 subjektů omezeno na nejvýše 5 stran':'');
@@ -103,7 +119,7 @@ function showCoalitions(){const root=$('#coalitionResults');if(page===0)root.rep
  for(let i=before;i<to;i++){
   let s=filtered[i],row=ce('div','','coalition'),names=ce('div','','coal-names'),score=ce('div','','outcome '+(s.delta>=0?'ok':'near'));
   for(let j=0;j<s.list.length;j++){if(j)names.append(ce('span','+'));names.append(ce('span',s.list[j].name));}
-  score.append(ce('span',`${s.sum} / ${current.seats}`));score.append(ce('small',s.delta>=0?'většina'+(s.minimal?' · minimální':''):`chybí ${-s.delta}`));row.append(names,score);root.append(row);
+  score.append(ce('span',`${s.sum} / ${current.seats}`));score.append(ce('small',s.delta>=0?(s.list.length===1?'samostatná většina':'většina'+(s.minimal?' · minimální':'')):`chybí ${-s.delta}`));row.append(names,score);root.append(row);
  }
  $('#more').classList.toggle('hide',to>=filtered.length);page++;
 }
