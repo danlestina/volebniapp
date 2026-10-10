@@ -2,7 +2,9 @@
 const $=s=>document.querySelector(s), ce=(tag,text='',cls='')=>{let el=document.createElement(tag);el.textContent=text; if(cls) el.className=cls;return el;};
 const cf=new Intl.NumberFormat('cs-CZ');
 let reg=null, results={}, current=null, coalAll=[], page=0, filtered=[], state=null, pollTimer=null, requestSeq=0;
-let liveUrl="";
+// Veřejný rychlý zdroj – stejný pro všechny návštěvníky stránky.
+const LIVE_URL='https://script.google.com/macros/s/AKfycbzLT_4LDSY5WBHLDX_CQRyn3W8K2YS1YmGMRD4D3s9CLx88Yr3bKpq9UsVrbqETyBa6/exec';
+const liveUrl=LIVE_URL;
 const liveInFlight=new Set();
 const liveResults=new Map();
 const districtLoaded=new Map();
@@ -12,7 +14,16 @@ const int=n=>Number(n)||0;
 const num=n=>cf.format(int(n));
 const labelText=(root,value,cls='')=>root.append(ce('span',value,cls));
 // Rychlá data mají přednost před zpožděnými okresními soubory z GitHubu.
-const resultFor=id=>liveResults.get(String(id))?.result || results[String(id)];
+const resultFor=id=>{
+ const live=liveResults.get(String(id))?.result, cached=results[String(id)];
+ if(!live)return cached;
+ if(!cached?.complete || !live.complete || cached.status!=='ok')return live;
+ return {...live,parties:live.parties.map(p=>{
+  if(p.elected?.length)return p;
+  const saved=cached.parties?.find(x=>x.ballot===p.ballot && x.votes===p.votes && x.seats===p.seats);
+  return saved?.elected?.length?{...p,elected:saved.elected}:p;
+ })};
+};
 const PICK=['České Budějovice','Praha','Praha 10','Čestlice','Deštné v Orlických horách','Brno'];
 function createSelector(root,id,text){const b=ce('button',text,'pick');b.type='button';b.addEventListener('click',()=>choose(id));b.dataset.place=id;root.append(b);}
 function renderLeft(){
@@ -74,7 +85,45 @@ function renderSeats(data){
  for(const p of sorted){if(!p.seats)continue;const seg=ce('span');seg.style.flex=String(p.seats);seg.style.background=colors[idx++%colors.length];seg.title=`${p.name}: ${p.seats} mandátů`;bar.append(seg);}area.append(bar);
  let table=ce('table');let head=ce('thead');let tr=ce('tr');['Kandidátní listina','Hlasy','Mandáty'].forEach((x,i)=>tr.append(ce('th',x,i?'num':'')));head.append(tr);table.append(head);
  let tb=ce('tbody');for(const p of sorted){tr=ce('tr');tr.append(ce('td',p.name));tr.append(ce('td',num(p.votes),'num'));tr.append(ce('td',num(p.seats),'num'));tb.append(tr);}table.append(tb);let wrap=ce('div','','tablewrap');wrap.append(table);area.append(wrap);
+ renderElected(area,data,sorted);
  area.append(ce('p',data.complete?'Mandáty po úplném sečtení (pokud dostupné, převzaté od ČSÚ).':`Neoficiální přepočet ze sečtených hlasů. Uplatněná vstupní hranice: ${data.threshold===null?'bez hranice':data.threshold+' %'}.`,'fineprint'));
+}
+
+// Jednotlivé zvolené osoby: jména přebíráme z oficiálního XML ČSÚ.
+// Za neúplného sčítání v něm nejsou k dispozici hlasy všech kandidátů,
+// proto žádná konkrétní jména neodhadujeme pouze z pořadí na kandidátce.
+function renderElected(area,data,sorted){
+ const section=ce('section','','elected-section');
+ section.append(ce('h4','Kdo získal mandát – podle kandidátek'));
+ if(!data.complete){
+  section.append(ce('p','Zastupitelé zatím nejsou jmenovitě určeni. ČSÚ zveřejní seznam zvolených osob až po dopočítání zastupitelstva.','fineprint'));
+  area.append(section);return;
+ }
+ const listed=sorted.filter(p=>p.seats>0);
+ if(!listed.length)return;
+ const withNames=listed.filter(p=>Array.isArray(p.elected) && p.elected.length>0);
+ if(!withNames.length){
+  section.append(ce('p','Oficiální jmenné výsledky zatím nejsou v načtených datech dostupné. Po aktualizaci zdroje se doplní automaticky.','fineprint'));
+  area.append(section);return;
+ }
+ for(const party of listed){
+  const details=ce('details','','elected-party');
+  const names=Array.isArray(party.elected)?party.elected:[];
+  details.append(ce('summary',`${party.name} · ${names.length} jmen z ${party.seats} mandátů`));
+  if(party.seats<=10)details.open=true;
+  if(names.length){
+   const list=ce('ol','','elected-names');
+   for(const person of names){
+    const name=String(person.name||'').trim();
+    if(!name)continue;
+    const label=name+(person.votes!=null?` · ${num(person.votes)} hlasů`:'');
+    list.append(ce('li',label));
+   }
+   details.append(list);
+  }else details.append(ce('p','Jména zatím nejsou v dostupných údajích ČSÚ.','fineprint'));
+  section.append(details);
+ }
+ area.append(section);
 }
 function setupOptions(data){let root=$('#exclusions'),existing=new Set([...root.querySelectorAll('input:checked')].map(x=>x.value));root.replaceChildren();
  for(const p of data.parties.filter(p=>p.seats>0).sort((a,b)=>b.seats-a.seats)){
@@ -148,7 +197,7 @@ function convertLiveData(raw, council){
   const b=ballotMap.get(String(p.ballot));
   if(!b || !Number.isSafeInteger(Number(p.votes)) || Number(p.votes)<0)throw Error('Neodpovídající číslo kandidátky nebo hlasy');
   return {ballot:String(p.ballot),name:b.name,votes:Number(p.votes),officialSeats:p.officialSeats,
-    candidates:Number(b.candidates)||0};
+    candidates:Number(b.candidates)||0, elected:Array.isArray(p.elected)?p.elected:[]};
  });
  const {seats,threshold,tie}=liveDHondt(parties,Number(council.seats));
  const official=parties.reduce((sum,p)=>sum+(Number(p.officialSeats)||0),0);
@@ -227,24 +276,6 @@ async function loadLiveForCurrent(){
   $('#liveStatus').textContent='Rychlý režim: '+error.message+' · GitHub zůstává záložním zdrojem.';
  }finally{liveInFlight.delete(selectedId);}
 }
-function isValidLiveUrl(url){
- try{const u=new URL(url);return u.protocol==='https:' && u.hostname==='script.google.com' && /^\/macros\/s\/[A-Za-z0-9_-]+\/exec\/?$/.test(u.pathname);}catch{return false;}
-}
-function saveLive(){
- const value=$('#liveEndpoint').value.trim();
- if(value && !isValidLiveUrl(value)){
-  $('#liveStatus').textContent='Neplatná adresa. Vlož celý odkaz Web app končící /exec.';
-  return;
- }
- liveUrl=value;
- try{localStorage.setItem('volebniapp_live_url',liveUrl);}catch{}
- if(!liveUrl){liveResults.clear();$('#liveStatus').textContent='Rychlý režim vypnut, používají se výsledky GitHubu.';display();return;}
- $('#liveStatus').textContent='Zkouším živý zdroj pro vybranou obec…';
- void loadLiveForCurrent();
-}
-$('#saveLive').addEventListener('click',saveLive);
-try{const v=localStorage.getItem('volebniapp_live_url')||'';if(isValidLiveUrl(v)){liveUrl=v;$('#liveEndpoint').value=v;$('#liveStatus').textContent='Rychlý režim zapnut: první kontrola při načtení obce.';}}catch{}
-
 // Registry se načtou jednou za návštěvu. Výsledky jsou rozdělené podle okresů.
 async function loadDistrict(district, force=false){
  const id=String(district), revision=state?.lastBatch ?? 0;
