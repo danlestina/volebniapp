@@ -181,31 +181,41 @@ def parse_batch(xml):
         if uppername(node.tag) in ('CHYBA','ERROR') or str(a.get('KOD_CHYBY','')) in ('10','9999'):
             raise ValueError('ČSÚ oznámil chybu v XML: '+ET.tostring(node,encoding='unicode')[:220])
     out={}
+    encountered=0
     for node in root.iter():
         if uppername(node.tag)!='OBEC':continue
+        encountered+=1
         a=attr(node)
         id=pick_num(a,'KODZASTUP','CIS_OBEC','CIS_ZASTUP','KOD_OBCE')
-        if id is None:continue
+        if id is None:
+            raise ValueError('V dávce je zastupitelstvo OBEC bez rozpoznaného KODZASTUP; kurzor se neposune.')
         parties=[]
         for p in node.iter():
             if uppername(p.tag) not in ('VOLEBNI_STRANA','STRANA'):continue
             pa=attr(p)
-            ballot=pick_num(pa,'POR_STR_HL','PORADI_STRANY','CIS_STRANY','POR_STRANY','KSTRANA','PORADI')
+            ballot=pick_num(pa,'POR_STR_HLAS_LIST','POR_STR_HL','PORADI_STRANY','CIS_STRANY','POR_STRANY','KSTRANA','PORADI')
             votes=pick_num(pa,'HLASY_STR','HLASY','HLASY_CELK','POC_HLASU','HLASY_VS','HLASY_STRANA','HLASY_POCET','HLASY_CELKEM','POC_HLASU_STR')
             if ballot is not None and votes is not None:
                 parties.append({'ballot':str(ballot),'votes':votes,
-                                'officialSeats':pick_num(pa,'MAND_STR','MANDATY','POC_MANDATU','MANDATY_POCET')})
-        if not parties:continue
+                                'officialSeats':pick_num(pa,'ZASTUPITELE_POCET','MAND_STR','MANDATY','POC_MANDATU','MANDATY_POCET')})
+        if not parties:
+            raise ValueError(f'Zastupitelstvo {id} v dávce nemá rozpoznané kandidátky ani hlasy; dávka se nepřeskočí.')
         processed=pick_num(a,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU')
-        total=pick_num(a,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET')
+        total=pick_num(a,'OKRSKY_CELKEM','OKRSKY_CELK','OKRSKY_POCET')
         if processed is None or total is None:
             for child in node.iter():
                 ca=attr(child)
                 if processed is None:processed=pick_num(ca,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU')
-                if total is None:total=pick_num(ca,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET')
+                if total is None:total=pick_num(ca,'OKRSKY_CELKEM','OKRSKY_CELK','OKRSKY_POCET')
         out[str(id)]={'processed':processed,'total':total,'parties':parties}
     if not out:
-        raise ValueError('Dávka neobsahuje rozpoznané záznamy OBEC a hlasy kandidátek; cursor se neposune.')
+        raise ValueError('Dávka neobsahuje rozpoznané záznamy OBEC a hlasy kandidátek; kurzor se neposune.')
+    for node in root:
+        if uppername(node.tag)=='DAVKA':
+            declared=pick_num(attr(node),'POCET_OBCI')
+            if declared is not None and declared!=encountered:
+                raise ValueError(f'Dávka deklaruje {declared} obcí, XML obsahuje {encountered}; kurzor se neposune.')
+            break
     return out
 
 
