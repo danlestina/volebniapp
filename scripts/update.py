@@ -145,7 +145,7 @@ def build_registry():
                  key=lambda id:councils[id]['name'].casefold())
     mapping={}
     for name in PRESETS:
-        matches=[c for c in councils.values() if c['name'].casefold()==name.casefold()]
+      matches=[c for c in councils.values() if c['name'].casefold() == ('praha hl.m.' if name == 'Praha' else name.casefold())]
         if name=='Praha':matches=[c for c in matches if c['seats']>=40]
         if matches:
             matches.sort(key=lambda c:(c['seats'],c['id']), reverse=True)
