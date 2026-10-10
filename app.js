@@ -1,7 +1,8 @@
 'use strict';
 const $=s=>document.querySelector(s), ce=(tag,text='',cls='')=>{let el=document.createElement(tag);el.textContent=text; if(cls) el.className=cls;return el;};
 const cf=new Intl.NumberFormat('cs-CZ');
-let reg=null, results={}, current=null, coalAll=[], page=0, filtered=[];
+let reg=null, results={}, current=null, coalAll=[], page=0, filtered=[], state=null, pollTimer=null, requestSeq=0;
+const districtLoaded=new Map();
 const colors=['#367bc3','#f09e34','#27a69a','#ad6ac4','#d86579','#76953f','#7a8da2','#c08f64','#658ce4','#a0af4d','#d87046','#588a84','#9367a7','#bd7e9b'];
 const squish=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 const int=n=>Number(n)||0;
@@ -34,8 +35,8 @@ function display(){if(!current)return;
  const meta=$('#meta');meta.replaceChildren();labelText(meta,`Zastupitelů: ${num(c.seats)}`,'pill');labelText(meta,`Kód: ${c.id}`,'subtle');
  if(c.pirateNominated){labelText(meta,`Nominace Pirátů: ${c.pirateNominated}`,'pill');const ds=ce('details');const summ=ce('summary','Zobrazit nominované kandidáty','subtle');summ.style.cursor='pointer';ds.append(summ);for(let p of c.pirateCandidates||[])ds.append(ce('div',`${p.name} – ${p.party}`,'fineprint'));meta.append(ds);}
  const sm=$('#summary');sm.querySelectorAll('.warning,.info,.error').forEach(n=>n.remove());const info=ce('div','','info');info.style.marginTop='16px';sm.append(info);
- if(!reg.updated){info.textContent='Čeká se na první aktualizaci registrů ČSÚ na GitHubu.';blank();return;}
- if(!data){info.textContent='Pro toto zastupitelstvo zatím nejsou zveřejněny výsledky v načtených datech. Zpracování okrsků začíná 10. 10. 2026 po 14:00.';blank();return;}
+ if(!reg.updated){info.textContent='Čeká se na první načtení registrů ČSÚ na GitHubu.';blank();return;}
+ if(!data){info.textContent='Pro toto zastupitelstvo ještě nejsou data, případně nebyla úspěšně zpracována první dávka ČSÚ. Zkontroluj čas poslední aktualizace a GitHub Actions.';blank();return;}
  if(data.status!=='ok'){info.className='warning';info.textContent=data.message||'Výsledky zatím nelze spolehlivě přepočítat.';blank();return;}
  if(data.processed!=null&&data.total!=null){const done=100*data.processed/Math.max(1,data.total);info.textContent=`Sečteno ${data.processed} z ${data.total} okrsků (${done.toLocaleString('cs-CZ',{maximumFractionDigits:1})} %). `+(data.complete?'Konečné výsledky za obec.':'Průběžné mandáty vypočtené ze sečtených hlasů – nejde o předpověď.');}
  else info.textContent='Procento sečtených okrsků nebylo v datech rozpoznáno. Mandáty jsou neoficiálním přepočtem dosavadních hlasů.';
@@ -95,14 +96,67 @@ function showCoalitions(){const root=$('#coalitionResults');if(page===0)root.rep
 }
 for(let id of ['maxParties','typeFilter','gap'])$(('#'+id)).addEventListener('change',refreshCoalitions);
 $('#more').addEventListener('click',showCoalitions);
-async function load(){try{
-  const stamp='?v='+Math.floor(Date.now()/60000);
-  const [r,v]=await Promise.all([fetch('./data/registr.json'+stamp,{cache:'no-store'}),fetch('./data/results.json'+stamp,{cache:'no-store'})]);
-  if(!r.ok||!v.ok)throw new Error('Data nebyla zpřístupněna na webu.');
-  let newReg=await r.json(),newData=await v.json();reg=newReg;results=newData.results||{};
-  let when=newData.updated||newReg.updated;$('#status').textContent=when?`Aktualizace ${new Date(when).toLocaleString('cs-CZ',{dateStyle:'short',timeStyle:'short'})}`:'Čeká se na první import';
-  renderLeft();const id=decodeURIComponent(location.hash.slice(1));const fallback=newReg.presets?.['České Budějovice'];
-  choose((current&&current.id)|| (newReg.councils?.[id]?id:fallback));
-  if(!Object.keys(newReg.councils||{}).length){$('#cityName').textContent='Data zatím nejsou načtena';}
- }catch(e){$('#status').textContent='Data nedostupná';$('#summary').append(ce('div','Chyba načítání: '+e.message,'error'));}}
-load();setInterval(load,60000);
+// Registry se načtou jednou za návštěvu. Výsledky jsou rozdělené podle okresů.
+async function loadDistrict(district, force=false){
+ const id=String(district), revision=state?.lastBatch ?? 0;
+ if(!force && districtLoaded.get(id)===revision)return;
+ try{
+  const url='./data/okresy/'+encodeURIComponent(id)+'.json?v='+revision;
+  const response=await fetch(url,{cache:'no-store'});
+  if(response.status===404){districtLoaded.set(id,revision);return;}
+  if(!response.ok)throw new Error('HTTP '+response.status);
+  const data=await response.json();
+  Object.assign(results,data.results||{});
+  districtLoaded.set(id,revision);
+ }catch(error){
+  $('#status').textContent='Nepodařilo se načíst výsledky okresu: '+error.message;
+ }
+}
+function updateStamp(){
+ const t=state?.updated;
+ $('#status').textContent=t
+  ?`Dávka ${state.lastBatch} · aktualizace ${new Date(t).toLocaleString('cs-CZ',{dateStyle:'short',timeStyle:'short'})}`
+  :'Registry načteny · čeká se na první dávku ČSÚ';
+}
+async function initialize(){
+ try{
+  const response=await fetch('./data/registr.json?v=2',{cache:'no-store'});
+  if(!response.ok)throw new Error('Registr kandidátek není dostupný.');
+  reg=await response.json();
+  if(!Object.keys(reg.councils||{}).length){
+   $('#status').textContent='Čeká se na první import kandidátek';
+   $('#cityName').textContent='Nejprve spusť aktualizaci na GitHubu';
+   return;
+  }
+  renderLeft();
+  await checkUpdates(true);
+  const hash=decodeURIComponent(location.hash.slice(1));
+  const id=(reg.councils?.[hash]?hash:reg.presets?.['České Budějovice']);
+  if(id)await choose(id);
+ }catch(err){
+  $('#status').textContent='Chyba: '+err.message;
+ }
+}
+async function checkUpdates(first=false){
+ try{
+  const res=await fetch('./data/state.json?time='+Date.now(),{cache:'no-store'});
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  const newer=await res.json();
+  const changed=!state || Number(newer.lastBatch)!==Number(state.lastBatch);
+  state=newer;updateStamp();
+  if(changed && !first && current){
+   await loadDistrict(current.district,true);
+   display();
+  }
+ }catch(err){$('#status').textContent='Kontrola aktualizace selhala: '+err.message;}
+}
+function schedulePolling(){
+ if(pollTimer)clearInterval(pollTimer);
+ const minutes=Number($('#pollInterval').value)||2;
+ try{localStorage.setItem('volebniapp_poll_minutes',String(minutes));}catch{}
+ pollTimer=setInterval(()=>{if(reg)checkUpdates();},minutes*60000);
+}
+$('#pollInterval').addEventListener('change',schedulePolling);
+$('#refreshNow').addEventListener('click',()=>checkUpdates());
+try{const v=localStorage.getItem('volebniapp_poll_minutes');if(['1','2','5','10'].includes(v))$('#pollInterval').value=v;}catch{}
+schedulePolling();initialize();

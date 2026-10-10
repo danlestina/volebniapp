@@ -1,305 +1,325 @@
 #!/usr/bin/env python3
-"""ČSÚ 2026 -> statická data pro GitHub Pages. Jen standardní knihovna Pythonu.
+"""Registr ČSÚ stáhnout jednou, dále inkrementální stavové dávky obcí.
 
-Při výpadku ČSÚ nepřepisuje předchozí výsledky prázdnými hodnotami.
+Bez externích knihoven. Každá úspěšná dávka nahrazuje údaje dotčené obce;
+nevytváří se žádný odhad za dosud nesečtené okrsky.
 """
 from __future__ import annotations
-
+import argparse
 import csv
 import io
 import json
-import math
 import os
-import re
 import sys
 import time
 import urllib.error
 import urllib.request
-from collections import Counter, defaultdict
-from datetime import datetime, timezone, timedelta
+from collections import Counter
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
+DIST_DIR = DATA / 'okresy'
 REG_URL = 'https://volby.gov.cz/opendata/kv2026/csv_od/{}.csv'
-RES_URL = 'https://volby.gov.cz/appdata/kv2026/20261009/odata/okresy/vysledky_obce_okres_{}.xml'
-PIRATI_NSTRANA = '720'  # ČSÚ: Česká pirátská strana, NAVRHUJÍCÍ strana
+BATCH_URL = 'https://volby.gov.cz/appdata/kv2026/20261009/odata/obce_d/vysledky_obce_{:05d}.xml'
+PIRATI_NSTRANA = '720'
 PRESETS = ['České Budějovice', 'Praha', 'Praha 10', 'Čestlice', 'Deštné v Orlických horách', 'Brno']
-DISTRICTS = ['CZ0100'] + ['CZ020' + s for s in '123456789ABC'] + [f'CZ031{i}' for i in range(1,8)] + [f'CZ032{i}' for i in range(1,8)] + [f'CZ041{i}' for i in range(1,4)] + [f'CZ042{i}' for i in range(1,8)] + [f'CZ051{i}' for i in range(1,5)] + [f'CZ052{i}' for i in range(1,6)] + [f'CZ053{i}' for i in range(1,5)] + [f'CZ063{i}' for i in range(1,6)] + [f'CZ064{i}' for i in range(1,8)] + [f'CZ071{i}' for i in range(1,6)] + [f'CZ072{i}' for i in range(1,5)] + [f'CZ080{i}' for i in range(1,7)]
+MAX_BATCHES = 100  # po delším výpadku zbytek dožene další běh; nikdy nevynechá dávku
 
 
-def fetch(url, timeout=25):
-    req = urllib.request.Request(url, headers={'User-Agent':'KomunalniKoalice/1.0 (open data; github pages)', 'Accept':'*/*'})
-    for attempt in range(2):
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def read_json(path, fallback=None):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {} if fallback is None else fallback
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text=json.dumps(value, ensure_ascii=False, separators=(',', ':'), sort_keys=True)+'\n'
+    if path.exists() and path.read_text(encoding='utf-8')==text:
+        return False
+    path.write_text(text, encoding='utf-8')
+    return True
+
+
+def fetch(url, timeout=20):
+    request=urllib.request.Request(url, headers={'User-Agent':'VolebniApp2026/2.0 (public election open data)','Accept':'application/xml,text/csv,*/*'})
+    for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
-                return res.read()
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt == 1: raise
-            time.sleep(1.5)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as ex:
+            if ex.code in (400, 404):
+                raise  # typický konec dostupných dávek; zbytečně neopakovat
+            if attempt==2:raise
+        except (urllib.error.URLError,TimeoutError):
+            if attempt==2:raise
+        time.sleep(1.5*(attempt+1))
 
 
-def csv_rows(name):
-    b = fetch(REG_URL.format(name))
-    for encoding in ('utf-8-sig', 'cp1250'):
-        try: text = b.decode(encoding); break
-        except UnicodeDecodeError: continue
-    sample = text[:8192]
-    try: sep = csv.Sniffer().sniff(sample, delimiters=';,\t').delimiter
-    except csv.Error: sep = ';'
-    return [{str(k).strip().lstrip('\ufeff').upper(): (v or '').strip() for k,v in row.items() if k} for row in csv.DictReader(io.StringIO(text), delimiter=sep)]
+def norm_int(v,default=0):
+    try:return int(str(v).strip())
+    except (TypeError,ValueError):return default
 
 
-def num(value, default=0):
-    try: return int(str(value).strip())
-    except (TypeError, ValueError):
-        try: return int(float(str(value).replace(',','.')))
-        except (TypeError, ValueError): return default
+def code(v):
+    return str(norm_int(v))
 
 
-def key(v): return str(num(v))
+def uppername(tag):
+    return str(tag).split('}',1)[-1].upper()
 
 
-def lname(s): return s.split('}',1)[-1].upper()
+def attr(node):
+    return {uppername(k):v for k,v in node.attrib.items()}
 
 
-def attrs(node): return {lname(k):v for k,v in node.attrib.items()}
-
-
-def getint(a, *names):
+def pick_num(mapping,*names):
     for n in names:
-        if n in a and a[n] not in ('',None):return num(a[n])
+        if n in mapping and str(mapping[n]).strip()!='':
+            return norm_int(mapping[n],None)
     return None
 
 
-def get_text(a, *names):
-    for n in names:
-        if n in a and str(a[n]).strip():return str(a[n]).strip()
-    return None
-
-
-def load_previous(file):
-    try: return json.loads((DATA / file).read_text(encoding='utf-8'))
-    except (OSError, json.JSONDecodeError): return {}
-
-
-def dump(file, obj):
-    DATA.mkdir(exist_ok=True)
-    (DATA / file).write_text(json.dumps(obj, ensure_ascii=False, separators=(',',':'), sort_keys=True)+'\n', encoding='utf-8')
+def load_csv(name):
+    raw=fetch(REG_URL.format(name), timeout=35)
+    text=raw.decode('utf-8-sig')
+    sample=text[:5000]
+    try:separator=csv.Sniffer().sniff(sample,delimiters=';,\t').delimiter
+    except csv.Error:separator=';'
+    return [{k.strip().upper():(v or '').strip() for k,v in row.items() if k} for row in csv.DictReader(io.StringIO(text),delimiter=separator)]
 
 
 def build_registry():
-    councils = csv_rows('kvrzcoco')
-    ballots = csv_rows('kvros')
-    candidates = csv_rows('kvrk')
-    by_council = {}
-    for row in councils:
-        ident = key(row.get('KODZASTUP'))
-        # Obce s více obvody mají v registru i řádky OBVODY=1/2.
-        if not ident or ident == '0': continue
-        if ident not in by_council or num(row.get('OBVODY')) in (0,1):
-            by_council[ident] = {
-                'id':ident, 'name':row.get('NAZEVZAST') or row.get('NAZEVOBCE') or ident,
-                'region':num(row.get('KRAJ')), 'district':num(row.get('OKRES')),
-                'seats':num(row.get('MANDATY')), 'wards':num(row.get('OBVODY')) != 0,
-                'pirateNominated':0,'pirateCandidates':[], 'ballots':[]}
-    # Zakládej kandidátky po (zastupitelstvo, obvod, strana); hlasovací číslo nemusí být shodné s OSTRANA.
-    ballot_lookup = {}
-    for b in ballots:
-        cid=key(b.get('KODZASTUP'))
-        if cid not in by_council:continue
-        ward=key(b.get('COBVODU') or '1')
-        party=key(b.get('OSTRANA'))
-        ballot_no=key(b.get('POR_STR_HL'))
-        item={'id':party,'ward':ward,'ballot':ballot_no, 'name':b.get('ZKRATKAO30') or b.get('NAZEVCELK') or f'Kandidátka {party}', 'fullName':b.get('NAZEVCELK') or '', 'candidates':0}
-        ballot_lookup[(cid,ward,party)] = item
-        by_council[cid]['ballots'].append(item)
-    for c in candidates:
-        if c.get('PLATNOST','A').upper() not in ('A','0'):continue
-        cid=key(c.get('KODZASTUP'))
-        if cid not in by_council:continue
-        ward=key(c.get('COBVODU') or '1'); party=key(c.get('OSTRANA'))
-        party_row=ballot_lookup.get((cid,ward,party))
-        if party_row is not None:party_row['candidates']+=1
-        if key(c.get('NSTRANA'))==PIRATI_NSTRANA:
-            by_council[cid]['pirateNominated']+=1
-            by_council[cid]['pirateCandidates'].append({'name':(c.get('JMENO','')+' '+c.get('PRIJMENI','')).strip(), 'party':party_row['name'] if party_row else '', 'ward':ward})
-    for v in by_council.values():
-        v['ballots'].sort(key=lambda b:(num(b['ward']),num(b['ballot'])))
-    # Kraj ČSÚ používá číselný kód 3100. Jako druhé ověření okresů 3101–3107.
-    southern = [v['id'] for v in by_council.values() if (v['region']==3100 or 3101<=v['district']<=3107) and v['pirateNominated']>0]
-    southern.sort(key=lambda i:by_council[i]['name'].casefold())
-    # Přesná shoda; Praha = zastupitelstvo hl. m., Praha 10 samostatná městská část.
-    mapping = {}
+    councils_rows=load_csv('kvrzcoco')
+    lists_rows=load_csv('kvros')
+    candidates_rows=load_csv('kvrk')
+    councils={}
+    for row in councils_rows:
+        id=code(row.get('KODZASTUP'))
+        if id=='0':continue
+        obvody=norm_int(row.get('OBVODY'))
+        if id not in councils or obvody in (0,1):
+            councils[id]={'id':id,'name':row.get('NAZEVZAST') or row.get('NAZEVOBCE') or id,
+                          'region':norm_int(row.get('KRAJ')),'district':norm_int(row.get('OKRES')),
+                          'seats':norm_int(row.get('MANDATY')),'wards':obvody==1,
+                          'pirateNominated':0,'pirateCandidates':[],'ballots':[]}
+    lookup={}
+    for row in lists_rows:
+        id=code(row.get('KODZASTUP'))
+        if id not in councils:continue
+        ward=code(row.get('COBVODU') or 1)
+        party=code(row.get('OSTRANA'))
+        ballot=code(row.get('POR_STR_HL'))
+        item={'id':party,'ward':ward,'ballot':ballot,
+              'name':row.get('ZKRATKAO30') or row.get('NAZEVCELK') or ('Kandidátka '+party),
+              'candidates':0}
+        lookup[(id,ward,party)]=item
+        councils[id]['ballots'].append(item)
+    for row in candidates_rows:
+        if row.get('PLATNOST','A').upper() not in ('A','0'):continue
+        id=code(row.get('KODZASTUP'))
+        if id not in councils:continue
+        ward=code(row.get('COBVODU') or 1)
+        party=code(row.get('OSTRANA'))
+        item=lookup.get((id,ward,party))
+        if item is not None:
+            item['candidates']+=1
+        if code(row.get('NSTRANA'))==PIRATI_NSTRANA:
+            councils[id]['pirateNominated']+=1
+            councils[id]['pirateCandidates'].append({'name':(row.get('JMENO','')+' '+row.get('PRIJMENI','')).strip(),
+                                                      'party':item['name'] if item else '', 'ward':ward})
+    if len(councils)<5000 or len(lists_rows)<15000 or len(candidates_rows)<120000:
+        raise ValueError(f'Neúplný registr ČSÚ: {len(councils)} obcí, {len(lists_rows)} kandidátek, {len(candidates_rows)} kandidátů')
+    for c in councils.values():
+        c['ballots'].sort(key=lambda p:(norm_int(p['ward']),norm_int(p['ballot'])))
+    south=sorted([id for id,c in councils.items() if (c['region']==3100 or 3101<=c['district']<=3107) and c['pirateNominated']],
+                 key=lambda id:councils[id]['name'].casefold())
+    mapping={}
     for name in PRESETS:
-        matched = [v for v in by_council.values() if v['name'].casefold() == name.casefold()]
-        if name == 'Praha':
-            matched = [v for v in matched if v['name']=='Praha' and v['seats']>=40]
-        if len(matched)==1:mapping[name]=matched[0]['id']
-        elif matched: mapping[name]=sorted(matched,key=lambda v:v['seats'],reverse=True)[0]['id']
-        else:print(f'UPOZORNĚNÍ: předvolba nenalezena: {name}',file=sys.stderr)
-    print(f'Registr: {len(by_council)} zastupitelstev, {len(southern)} jihočeských s nominací Pirátů, předvoleb {len(mapping)}')
-    return {'updated': datetime.now(timezone.utc).isoformat(), 'source':'ČSÚ / registry 2026','councils':by_council,'presets':mapping,'southBohemiaPirates':southern}
+        matches=[c for c in councils.values() if c['name'].casefold()==name.casefold()]
+        if name=='Praha':matches=[c for c in matches if c['seats']>=40]
+        if matches:
+            matches.sort(key=lambda c:(c['seats'],c['id']), reverse=True)
+            mapping[name]=matches[0]['id']
+        else:print('POZOR nenalezena předvolba',name,file=sys.stderr)
+    print(f'Registry ČSÚ: {len(councils)} zastupitelstev, {len(south)} jihočeských s nominací Pirátů, {len(mapping)} předvoleb')
+    return {'updated':now(),'source':'ČSÚ – registr kandidátek a kandidátů pro komunální volby 2026',
+            'councils':councils,'presets':mapping,'southBohemiaPirates':south}
 
 
-def parse_result_xml(data, council_ids=None):
-    """Načte výsledky obce: hledá elementy VOLEBNI_STRANA s hlasy
-    a jejich nejbližší identifikátor obce. Výsledek raději vynechá než odhadne.
+def ensure_registry(force=False):
+    p=DATA/'registr.json'
+    previous=read_json(p)
+    if len(previous.get('councils',{}))>5000 and not force:
+        print('Registr kandidátů: používám již uložená data, znovu nestahuji.')
+        return previous
+    value=build_registry()
+    write_json(p,value)
+    return value
+
+
+def parse_batch(xml):
+    """Vrací stavové záznamy OBEC. Pokud se XML liší od očekávaného,
+    vyvolá výjimku, aby se NEposunul kurzor a nebyly tiše přeskočeny obce.
     """
-    root = ET.fromstring(data)
+    root=ET.fromstring(xml)
+    for node in root.iter():
+        a=attr(node)
+        if uppername(node.tag) in ('CHYBA','ERROR') or str(a.get('KOD_CHYBY','')) in ('10','9999'):
+            raise ValueError('ČSÚ oznámil chybu v XML: '+ET.tostring(node,encoding='unicode')[:220])
     out={}
-    # Identifikátory v XML ČSÚ: CIS_OBEC je kód zastupitelstva u obcí i MČ/MO.
-    # Více úrovní OBEC pro modely s obvody – každý záznam načteme odděleně.
-    for obec in root.iter():
-        if lname(obec.tag) != 'OBEC':continue
-        a=attrs(obec)
-        cid = getint(a,'KODZASTUP','CIS_OBEC','CIS_ZASTUP','KOD_OBCE','CIS_MC')
-        if cid is None:continue
-        cid=str(cid)
-        if council_ids is not None and cid not in council_ids:continue
-        party_nodes = [p for p in obec.iter() if lname(p.tag) == 'VOLEBNI_STRANA']
-        if not party_nodes:continue
-        parsed=[]
-        for p in party_nodes:
-            pa=attrs(p)
-            ballot=getint(pa,'POR_STR_HL','PORADI_STRANY','CIS_STRANY','POR_STRANY','KSTRANA','PORADI')
-            votes=getint(pa,'HLASY','HLASY_STR','HLASY_CELK','POC_HLASU','HLASY_VS','HLASY_STRANA','HLASY_POCET','HLASY_CELKEM','POC_HLASU_STR')
-            if ballot is None:
-                for k,v in pa.items():
-                    if ('POR' in k or 'CIS' in k) and ('STR' in k or 'LIST' in k) and str(v).isdigit():
-                        ballot = int(v); break
-            if votes is None:
-                for k,v in pa.items():
-                    if ('HLASY' in k or 'HLASU' in k) and 'PROC' not in k and 'PODIL' not in k and str(v).isdigit():
-                        votes = int(v); break
+    for node in root.iter():
+        if uppername(node.tag)!='OBEC':continue
+        a=attr(node)
+        id=pick_num(a,'KODZASTUP','CIS_OBEC','CIS_ZASTUP','KOD_OBCE')
+        if id is None:continue
+        parties=[]
+        for p in node.iter():
+            if uppername(p.tag) not in ('VOLEBNI_STRANA','STRANA'):continue
+            pa=attr(p)
+            ballot=pick_num(pa,'POR_STR_HL','PORADI_STRANY','CIS_STRANY','POR_STRANY','KSTRANA','PORADI')
+            votes=pick_num(pa,'HLASY_STR','HLASY','HLASY_CELK','POC_HLASU','HLASY_VS','HLASY_STRANA','HLASY_POCET','HLASY_CELKEM','POC_HLASU_STR')
             if ballot is not None and votes is not None:
-                parsed.append({'ballot':str(ballot),'votes':votes, 'officialSeats':getint(pa,'MANDATY','MAND_STR','POC_MANDATU','MANDATY_POCET')})
-        if not parsed: continue
-        if not any(p['votes'] > 0 for p in parsed): continue
-        # Nejbližší údaje o sčítání (mohou být na elementu OBEC nebo VOLENI).
-        scopes=[a]+[attrs(c) for c in obec.iter() if lname(c.tag) in ('VOLENI','VYSLEDKY')]
-        processed=next((getint(x,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU') for x in scopes if getint(x,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU') is not None),None)
-        total=next((getint(x,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET') for x in scopes if getint(x,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET') is not None),None)
-        out[cid]={'processed':processed,'total':total,'parties':parsed}
+                parties.append({'ballot':str(ballot),'votes':votes,
+                                'officialSeats':pick_num(pa,'MAND_STR','MANDATY','POC_MANDATU','MANDATY_POCET')})
+        if not parties:continue
+        processed=pick_num(a,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU')
+        total=pick_num(a,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET')
+        if processed is None or total is None:
+            for child in node.iter():
+                ca=attr(child)
+                if processed is None:processed=pick_num(ca,'OKRSKY_ZPRAC','OKRSKY_ZPRACOV','ZPRACOVANO_OKRSKU')
+                if total is None:total=pick_num(ca,'OKRSKY_CELK','OKRSKY_CELKEM','OKRSKY_POCET')
+        out[str(id)]={'processed':processed,'total':total,'parties':parties}
+    if not out:
+        raise ValueError('Dávka neobsahuje rozpoznané záznamy OBEC a hlasy kandidátek; cursor se neposune.')
     return out
 
 
-def dhondt(parties, seats):
-    """Výsledek pro jednu volební jednotku. Rovnost v rozhodném posledním mandátu: los, netvrdit jistotu."""
-    votes_total=sum(p['votes'] for p in parties)
-    if not votes_total or seats<1:return {p['ballot']:0 for p in parties},None,None
+def dhondt(parties,seats):
+    """§45 zák. 491/2001 Sb. Vracení losové situace, nepředstírat jistotu."""
+    total=sum(p['votes'] for p in parties)
+    zero={p['ballot']:0 for p in parties}
+    if not total or seats<=0:return zero,None,False
     valid=[p for p in parties if p['candidates']>0 and p['votes']>0]
-    if not valid:return {p['ballot']:0 for p in parties},None,None
-    threshold=None
+    if not valid:return zero,None,False
     if len(parties)==1:
-        eligible=valid
+        eligible=valid;threshold=None
     else:
-        for t in range(5,-1,-1):
-            eligible=[p for p in valid if p['votes']*100*seats >= t*votes_total*min(p['candidates'],seats)]
-            if len(eligible)>=2 and sum(min(p['candidates'],seats) for p in eligible)>= min(seats,max(5,(seats//2+1))):
-                threshold=t;break
-        else:
-            eligible=valid;threshold=0
+        eligible=[];threshold=0
+        for t in (5,4,3,2,1,0):
+            cand=[p for p in valid if p['votes']*100*seats >= t*total*min(p['candidates'],seats)]
+            # druhá podmínka: alespoň nadpoloviční většina a pro vícečlenné zastupitelstvo přes 5 členů
+            need=min(seats,max(seats//2+1,5))
+            if len(cand)>=2 and sum(min(p['candidates'],seats) for p in cand)>=need:
+                eligible=cand;threshold=t;break
+        if not eligible:eligible=valid;threshold=0
     quot=[]
     for p in eligible:
         for divisor in range(1,min(p['candidates'],seats)+1):
             quot.append((Fraction(p['votes'],divisor),p['votes'],p['ballot']))
-    quot.sort(key=lambda x:(x[0],x[1]),reverse=True)
-    winners=quot[:seats]
-    tie=False
-    if len(quot)>seats and winners:
-        tie=quot[seats][:2]==quot[seats-1][:2]
-    out=Counter(b for _,_,b in winners)
-    return {p['ballot']:out[p['ballot']] for p in parties},threshold,tie
+    quot.sort(key=lambda q:(q[0],q[1]),reverse=True)
+    winner=quot[:seats]
+    tie=len(quot)>seats and bool(winner) and quot[seats][:2]==quot[seats-1][:2]
+    count=Counter(x[2] for x in winner)
+    return {p['ballot']:count[p['ballot']] for p in parties},threshold,tie
 
 
-def assemble(raw, reg):
-    # listinné názvy a počet kandidátů pochází z registru, hlasy z XML.
+def assemble(raw,reg):
     result={}
-    for ident, r in raw.items():
-        c=reg['councils'].get(ident)
-        if not c:continue
-        if c['wards']:
-            result[ident]={'status':'warded','message':'Více volebních obvodů – průběžné rozdělení mandátů zde není podporováno.'}
+    for id, entry in raw.items():
+        council=reg['councils'].get(id)
+        if council is None:continue
+        if council['wards']:
+            result[id]={'status':'warded','message':'Více volebních obvodů – rozdělení mandátů zatím nepočítáme.'}
             continue
-        lookup={str(x['ballot']):x for x in c['ballots']}
+        lists={b['ballot']:b for b in council['ballots'] if b['ward']=='1'}
         parties=[]
-        for p in r['parties']:
-            b=lookup.get(p['ballot'])
-            if not b:continue
-            parties.append({'ballot':p['ballot'],'name':b['name'],'votes':p['votes'],'candidates':b['candidates'], 'officialSeats':p['officialSeats']})
-        # Bez jednoznačného spojení oficiálních hlasů s registrací raději nezveřejnit výpočet.
-        if not parties or len(parties)<len(lookup):
-            result[ident]={'status':'unmatched','message':'Neúplné nebo nejednoznačné propojení hlasů a kandidátek v XML ČSÚ.'}
+        for p in entry['parties']:
+            match=lists.get(p['ballot'])
+            if match:
+                parties.append({**p,'name':match['name'],'candidates':match['candidates']})
+        if not parties or len(parties)!=len(lists) or len(set(p['ballot'] for p in parties))!=len(parties):
+            result[id]={'status':'unmatched','message':'ČSÚ XML neodpovídá registru kandidátek; nelze bezpečně přepočítat.'}
             continue
-        allotted,threshold,tie=dhondt(parties,c['seats'])
-        for p in parties:p['seats']=allotted.get(p['ballot'],0)
-        done=r['processed'] is not None and r['total'] is not None and r['processed']==r['total']
-        # Oficiální mandáty preferujeme pouze při potvrzeném dopočtu celé obce.
-        if done and all(p['officialSeats'] is not None for p in parties):
-            for p in parties:p['seats']=p['officialSeats']
-        result[ident]={'status':'ok','processed':r['processed'],'total':r['total'], 'complete':done,
-                       'threshold':threshold,'lotTie':tie,'parties':parties}
+        seats,threshold,tie=dhondt(parties,council['seats'])
+        official=sum(p['officialSeats'] or 0 for p in parties)
+        complete=(entry['total'] is not None and entry['processed'] is not None and entry['total']==entry['processed'])
+        if official==council['seats'] and all(p['officialSeats'] is not None for p in parties):
+            complete=True
+        for p in parties:
+            p['seats']=p['officialSeats'] if complete and official==council['seats'] else seats.get(p['ballot'],0)
+        result[id]={'status':'ok','processed':entry['processed'],'total':entry['total'],
+                    'complete':complete,'threshold':threshold,'lotTie':tie,'parties':parties}
     return result
 
 
-def update_registry():
-    old=load_previous('registr.json')
-    try:
-        at=datetime.fromisoformat(old.get('updated',''))
-        if old.get('councils') and datetime.now(timezone.utc)-at < timedelta(hours=12):
-            return old
-    except (TypeError, ValueError): pass
-    try:
-        r=build_registry()
-        dump('registr.json',r)
-        return r
-    except Exception as e:
-        old=load_previous('registr.json')
-        if old.get('councils'):
-            print(f'VAROVÁNÍ: registry ČSÚ nedostupné, použiji poslední: {e}',file=sys.stderr)
-            return old
-        raise
+def apply_batch(parsed,reg):
+    # Ukládání po okresích: prohlížeč načítá pouze 1 malý soubor pro vybranou obec.
+    patch=assemble(parsed,reg)
+    by_district={}
+    for id,row in patch.items():
+        dist=str(reg['councils'][id]['district'])
+        by_district.setdefault(dist,{})[id]=row
+    for district,change in by_district.items():
+        path=DIST_DIR/(district+'.json')
+        previous=read_json(path,{'results':{}})
+        original=previous.get('results',{})
+        original.update(change)
+        write_json(path,{'results':original})
+    return len(patch),len(by_district)
 
 
-def update_results(reg):
-    previous=load_previous('results.json')
-    states=previous.get('results',{})
-    fetched=0;failed=[]
-    # Ověřit dostupnost (před začátkem sčítání vrací ČSÚ zatím prázdnou/404 odpověď).
-    first=DISTRICTS[0]
-    try:
-        probe=fetch(RES_URL.format(first), timeout=8)
-        initial=parse_result_xml(probe,set(reg['councils']))
-        if not initial:
-            print('ČSÚ ještě nevydává parsovatelná průběžná data; registry jsou připraveny.')
-            return
-    except (ET.ParseError, urllib.error.URLError, TimeoutError, OSError) as e:
-        print(f'Čeká se na průběžné výsledky ČSÚ: {e}',file=sys.stderr)
-        return
-    for i,d in enumerate(DISTRICTS):
+def update_batches(reg):
+    path=DATA/'state.json'
+    state=read_json(path,{'version':2,'lastBatch':0,'updated':None})
+    cursor=norm_int(state.get('lastBatch'))
+    total_obec=0
+    for n in range(cursor+1,cursor+MAX_BATCHES+1):
         try:
-            xml=probe if d==first else fetch(RES_URL.format(d),timeout=10)
-            raw=parse_result_xml(xml,set(reg['councils']))
-            new=assemble(raw,reg)
-            if new:
-                states.update(new)
-                fetched+=1
-            elif b'<ERROR' in xml.upper() or b'<CHYBA' in xml.upper():
-                failed.append(d+': odpověď ČSÚ obsahuje chybu')
-        except (ET.ParseError,urllib.error.URLError, TimeoutError, OSError) as e:
-            failed.append(d+': '+str(e)[:80])
-    if failed:print('Neúspěšné okresy:',', '.join(failed[:16]),file=sys.stderr)
-    print(f'Úspěšné okresy se záznamy: {fetched}/{len(DISTRICTS)}; obce s výsledky: {sum(r.get("status")=="ok" for r in states.values())}')
-    dump('results.json',{'updated':datetime.now(timezone.utc).isoformat() if fetched else previous.get('updated'),
-                         'districtsWithData':fetched, 'districtsAttempted':len(DISTRICTS),'results':states})
+            xml=fetch(BATCH_URL.format(n))
+        except urllib.error.HTTPError as e:
+            if e.code in (400,404):
+                print(f'ČSÚ: dávka {n:05d} není zatím dostupná (HTTP {e.code}); poslední zpracovaná {cursor:05d}.')
+                break
+            raise
+        try:
+            patch=parse_batch(xml)
+        except (ET.ParseError,ValueError) as err:
+            # ČSÚ někdy vrací XML kód chyby 10 při neexistující dávce;
+            # nikdy jej neoznačíme jako úspěšně zpracovaný.
+            if 'KOD_CHYBY="10"' in xml.decode('utf-8','replace') or 'KOD_CHYBY="10"' in str(err):
+                print('ČSÚ: další dávka ještě není vydána:',n)
+                break
+            raise RuntimeError(f'Dávka {n:05d} má neočekávaný formát: {err}') from err
+        count,_=apply_batch(patch,reg)
+        if count==0:
+            raise RuntimeError(f'Dávka {n:05d} neobsahuje žádná registrovaná zastupitelstva, odmítám přeskočit.')
+        total_obec+=count
+        cursor=n
+        state={'version':2,'lastBatch':cursor,'updated':now(),
+               'source':'ČSÚ – přírůstkové výsledky obcí 2026'}
+        write_json(path,state)
+    print(f'Inkrementální data: dokončeno po dávku {cursor:05d}, změněných záznamů obcí {total_obec}.')
 
 
 def main():
-    reg=update_registry()
-    # Výsledky se publikují až po 14. hodině 10. října. Nezobrazuje žádná smyšlená data.
-    update_results(reg)
+    parser=argparse.ArgumentParser(description='Registr ČSÚ jednorázově, výsledky dávkově')
+    parser.add_argument('--registry-only',action='store_true')
+    parser.add_argument('--results-only',action='store_true')
+    args=parser.parse_args()
+    if args.registry_only and args.results_only:parser.error('Nelze kombinovat --registry-only a --results-only')
+    force=os.environ.get('FORCE_REGISTRY','').lower() in ('true','yes','1')
+    reg=ensure_registry(force=force and not args.results_only)
+    if not args.registry_only:update_batches(reg)
 
 if __name__=='__main__':main()

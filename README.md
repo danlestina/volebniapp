@@ -1,40 +1,52 @@
-# Komunální koalice 2026
+# Volební aplikace 2026 — verze 2
 
-Jednoduchá bezplatná webová aplikace pro **průběžné přepočítávání mandátů** do českých zastupitelstev a zobrazení všech početně možných koalic (nebo kombinací, kterým chybí 1–3 mandáty). Jde o neoficiální přepočet hlasů dostupných v daný okamžik, nikoliv o odhad výsledku ještě nesečtených okrsků.
+Výsledky komunálních voleb v libovolném českém zastupitelstvu, průběžný **neoficiální přepočet mandátů** a matematicky možné kombinace subjektů, které dosahují většiny nebo jim schází několik mandátů.
 
-## Kde jsou předvolby
+**Předvolby:** České Budějovice, Praha, Praha 10, Čestlice, Deštné v Orlických horách, Brno a skupina všech zastupitelstev v Jihočeském kraji, v nichž kandiduje platný kandidát *navržený Piráty* (`NSTRANA = 720`). Výběr libovolné další obce vyhledáváním.
 
-České Budějovice, Praha, Praha 10, Čestlice, Deštné v Orlických horách, Brno. A dále **automaticky všechny obce Jihočeského kraje, kde kandiduje alespoň jeden platný kandidát navržený Piráty**. Ověřuje se `NSTRANA = 720` (Česká pirátská strana) v oficiálním *registru kandidátů ČSÚ*, nikoliv pouze název kandidátní listiny či politická příslušnost kandidáta. Seznam se naplní po prvním úspěšném běhu skriptu.
+## Jak nahradit starou verzi v repozitáři `volebniapp`
 
-V aplikaci lze vyhledat jakékoliv jiné zastupitelstvo z ČR včetně městských částí Prahy. Pro aktuální výsledky si automatizace stahuje okresní XML data ČSÚ.
+1. Rozbal ZIP. Získáš složku `volebniapp-v2`. **Nahrávej její obsah, ne složku samotnou.** Nový balíček úmyslně neobsahuje `data/registr.json`, aby ti nesmazal už úspěšně načtené kandidátky; při prvním běhu vznikne automaticky.
+2. Na GitHubu otevři `https://github.com/danlestina/volebniapp`, v kartě **Code** zvol **Add file → Upload files** a přetáhni obsah rozbalené složky. Musí zůstat zachováno přesné členění cest (`index.html` přímo v kořeni, dále `app.js`, `.github/workflows/aktualizace.yml`, `scripts/update.py` a `data/...`). **Pozor: skrytou složku `.github` některé systémy nenahrají při přetažení.** Ověř ji na stránce repozitáře. Pokud GitHub nedovolí nahradit jednotlivé existující soubory přetažením, nejsnazší je GitHub Desktop, případně editace každého změněného souboru přímo na GitHubu.
+3. V repozitáři jdi do **Settings → Pages → Build and deployment → Source → GitHub Actions** (NIKOLI „Deploy from a branch“). Výběr se obvykle uloží hned.
+4. V **Settings → Actions → General → Workflow permissions** musí být umožněn zápis, pokud jej repozitář potřebuje. Ve workflow je výslovně požadované `contents: write`, `pages: write` a `id-token: write`.
+5. Otevři **Actions → Volební výsledky a zveřejnění webu → Run workflow → Run workflow**. **První běh jednorázově stáhne registr všech kandidátů a kandidátek** (cca 190 tisíc kandidátů). To může chvíli trvat. Výsledný soubor `data/registr.json` již bude v repozitáři a další běhy jej nebudou opakovaně stahovat.
+6. Po dokončení zkontroluj **Settings → Pages → Visit site** nebo `https://danlestina.github.io/volebniapp/`. Pokud běh končí červeně, otevři jeho podrobnosti a pošli protokol kroku s chybou. Kandidátní registr se ukládá samostatně před načítáním výsledků, takže může být zveřejněn i při chybě v následném XML.
 
-## Zprovoznění na GitHubu – bez instalace a hostingu
+### Důležité při nahrávání souborů
 
-1. Na [github.com/new](https://github.com/new) vytvoř **nový veřejný repozitář** (např. `komunalni-koalice`). Zaškrtni **Public**; ostatní volby mohou zůstat výchozí. Klikni **Create repository**.
-2. Rozbal stažený ZIP. Na stránce repozitáře zvol **Add file → Upload files** a nahraj *obsah* rozbalené složky: `index.html`, `app.js`, `README.md`, `data`, `scripts`, `tests`, **`.github/workflows/aktualizace.yml`** a `.nojekyll`. Pokud tvůj prohlížeč nepovolí nahrát složky, použij bezplatný **GitHub Desktop**. Důležité: `.github/workflows` musí být skutečně nahraná; pouhý obsah HTML nemůže sám stahovat výsledky ČSÚ. Dole potvrď **Commit changes**.
-3. V repozitáři otevři **Settings → Pages**, v části **Build and deployment → Source** vyber **Deploy from a branch**, dále **Branch: main / (root)** a klikni **Save**. GitHub zde po krátké době ukáže adresu `https://TVUJ-UCET.github.io/komunalni-koalice/`.
-4. Přejdi na **Actions → Aktualizovat výsledky ČSÚ → Run workflow → Run workflow**. Je-li potřeba, povol Actions tlačítkem **Enable workflows**. Počkej, až se zobrazí zelené zaškrtnutí. Ve složce `data` pak musí přibýt naplněný `registr.json`. Případné chyby jsou vidět v protokolu kroku „Načíst oficiální registry a hlasy“.
-5. Znovu načti webovou stránku. Automatické spouštění je nastaveno každých **10 minut**, GitHub však může běh opozdit. Stránka sama kontroluje nová data po minutě.
+Předchozí ručně přidaný `.github/workflows/aktualizace.yml` **musí být nahrazen novým obsahem**. Jinak bude aktivní stará automatizace. Pokud nový ZIP nenahraješ přes GitHub Desktop, otevři `.github/workflows/aktualizace.yml` přímo na GitHubu a obsah ručně nahraď přiloženým souborem.
 
-**Nemusíš mít zapnutý počítač.** GitHub Actions běží nezávisle. Nepoužívá žádný placený server ani přístupový klíč. GitHub Pages může být dostupné veřejně každému, kdo zná adresu. Pokud GitHub odmítne automatický zápis nových dat, nastav v **Settings → Actions → General → Workflow permissions** možnost **Read and write permissions**.
+Neodstraň soubor `data/registr.json`, pokud už obsahuje skutečné registry! Výsledková data v `data/okresy/` jsou nové uspořádání; původní `data/results.json` v repozitáři může zůstat, ale nová verze jej nepoužívá. Před prvním během je důležité, aby `data/state.json` mělo správný `lastBatch`; nová verze začíná od dávky 1. Pokud už proběhlo sčítání, postupně zpracuje všechny dřívější dávky.
 
-## Stav a limity
+## Jak funguje aktualizace
 
-- Výsledky 2026 ČSÚ podle oficiálního oznámení začínají přicházet v sobotu **10. října po 14:00**; do té doby budou výsledky prázdné, přestože registr kandidátek se už načetl.
-- Používá § 45 zákona č. 491/2001 Sb.: přepočtenou 5% klauzuli pro kratší kandidátky, případné snížení klauzule, d'Hondtovy dělitele 1, 2, 3 … pouze do počtu platných kandidátů. Rovné rozhodné podíly mohou vyžadovat los.
-- Při **více volebních obvodech v jedné obci** se zde průběžné mandáty nepočítají; výsledek je označen jako nepodporovaný. Nejde o celostátně pokročilou prognózu a nezohledňuje budoucí geografii sčítání.
-- Údaje o stranách nepředstavují doporučení možných reálných koalic; kombinace jsou pouze součty mandátů.
-- Výsledky se stahují automaticky z veřejně dostupných okresních XML (cca 77 požadavků na aktualizaci). Předvolby všech krajů se vytvářejí z registru. Datové servery mohou být ve volební špičce nedostupné; aplikace při výpadku zachová naposledy dostupný stav.
-- **Důležité pro otestování:** v tomto prostředí nebylo možné stáhnout skutečná CSV a XML z ČSÚ, proto nebylo možné celý import ověřit na živých datech. Součástí je několik jednotkových testů, ale po prvním běhu na GitHubu je potřeba ověřit, že se načtou registry i výsledky. Pokud se formulář nevyplní, protokol Actions ukáže problém. Zdrojové odkazy a struktury polí vycházejí z oficiální dokumentace ČSÚ pro rok 2026.
+- **Seznamy kandidátů a kandidátek**: stáhnou se z ČSÚ **při prvním úspěšném běhu jen jednou** a zůstanou v `data/registr.json`. Pro nucené obnovení zaškrtni při **Run workflow** volbu `refresh_registry`.
+- **Průběžné výsledky**: ČSÚ od roku 2026 vydává změněné obce v přírůstkových XML dávkách `.../odata/obce_d/vysledky_obce_00001.xml`, další `00002.xml` atd. Číslo poslední zpracované dávky je v `data/state.json`. Automatizace pokračuje od dalšího čísla a po přerušení dočte chybějící dávky. Při chybě XML se zastaví místo přeskočení dávky.
+- **Velikost dat pro prohlížeč**: po načtení registru stahuje výsledky jen z jednoho souboru `data/okresy/<kód-okresu>.json` pro aktuálně vybrané zastupitelstvo. Při pravidelných kontrolách stáhne jen drobný `data/state.json`, a nové výsledky okresu až při změně čísla dávky.
+- **Publikování**: workflow samo vytvoří balíček webu a zveřejní jej přes GitHub Pages. Už nezávisí na tom, zda nový commit vytvořený automatizací vyvolá sestavení stránky.
 
-## Odkazy
+## Nastavení frekvence
 
-- [ČSÚ – otevřená data 2026](https://volby.gov.cz/opendata/kv2026/kv2026_opendata.htm)
-- [ČSÚ – registry a číselníky 2026](https://volby.gov.cz/opendata/kv2026/kv2026_opendata_seznam.htm)
-- [ČSÚ – popis souborů XML](https://volby.gov.cz/opendata/kv2026/KV2026_XML.htm)
-- [ČSÚ – popis registrů](https://volby.gov.cz/opendata/kv2026/KV2026regPopis.htm)
-- [ČSÚ – metodika přidělování mandátů](https://csu.gov.cz/docs/107516/60133edd-7ea3-d25d-d3d0-c2ed275d42b3/rozdelovanimandatuzo26.pdf?version=1.1)
+**A. Stahování ČSÚ (GitHub):** uprav v `.github/workflows/aktualizace.yml` řádek `cron`. Výchozí `3,13,23,33,43,53 * * * *` = každých 10 minut. Pro 5 minut zadej `'*/5 * * * *'`, pro 15 minut `'*/15 * * * *'`. GitHub může běh odložit, minimum je 5 minut; nelze přepínat přímo tlačítkem na veřejném webu.
 
-## Technická údržba
+**B. Kontrola nového výsledku v otevřeném prohlížeči:** vyber přímo na stránce 1, 2, 5 nebo 10 minut, případně klikni „Zkontrolovat nyní“. To **nespouští** nové stahování ČSÚ. Nastavení zůstane uložené v prohlížeči.
 
-Aplikace je čistě statický `index.html` + `app.js`, obnovovací Python skript a workflow GitHub Actions. Lze spustit testy `python -m unittest discover -s tests -v`. Žádná další závislost není potřebná. Dvě JSON ve složce `data` jsou zpočátku prázdná a při prvním úspěšném naplánovaném běhu se zaplní.
+## Co ověřit po prvním spuštění
+
+1. V protokolu kroku `Jednorázově načíst registry kandidátů ČSÚ` musí být přibližně 6 tisíc a více zastupitelstev (kontrola úplnosti neumožní import jen malé části registru).
+2. V `data/registr.json` je více než 5 tisíc zastupitelstev a seznam `southBohemiaPirates` není prázdný.
+3. Jakmile ČSÚ publikuje alespoň jednu dávku, `data/state.json` ukáže `lastBatch >= 1`, a vznikne alespoň jeden soubor ve složce `data/okresy`.
+4. Přepočet konkrétní obce porovnej s oficiálními daty ČSÚ (zejména součty hlasů, vylosovaným číslem kandidátky, mandáty po úplném sečtení). **Přímé ověření živých CSV/XML nebylo v prostředí tvorby možné**; může se ukázat odlišnost od testovaných syntetických XML. Bez takového ověření není vhodné vydávat výpočty za definitivně ověřené.
+
+## Výpočet a jeho omezení
+
+Algoritmus implementuje vstupní hranici upravenou dle počtu platných kandidátů, její postupné snižování, d’Hondtovu řadu a omezení počtu mandátů počtem kandidátů. Shodné podíly, kde nestačí ani počet hlasů strany, vyžadují los – v aplikaci se zobrazí varování. Jde o **aritmetiku podle doposud sečtených okrsků**, nikoliv o předpověď výsledku; u více volebních obvodů v obci průběžný přepočet není podporován. Dosažitelné většiny v aplikaci nejsou politickým doporučením.
+
+## Podklady
+
+- [ČSÚ – registry, otevřená data](https://volby.gov.cz/opendata/kv2026/kv2026_opendata_seznam.htm)
+- [ČSÚ – přírůstkové obecní dávky](https://volby.gov.cz/opendata/kv2026/KV2026_XML.htm)
+- [ČSÚ – metodika mandátů](https://csu.gov.cz/docs/107516/60133edd-7ea3-d25d-d3d0-c2ed275d42b3/rozdelovanimandatuzo26.pdf?version=1.1)
+
+Testy: `python -m unittest discover -s tests -v`. Skript vyžaduje pouze Python 3.12 a standardní knihovnu.
