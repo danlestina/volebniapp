@@ -3,9 +3,7 @@ name: Volební výsledky a zveřejnění webu
 on:
   push:
     branches: [main]
-  schedule:
-    # GitHub nejrychleji po 5 minutách; může se opozdit.
-    - cron: '3,13,23,33,43,53 * * * *'
+
   workflow_dispatch:
     inputs:
       refresh_registry:
